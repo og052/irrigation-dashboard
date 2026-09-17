@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import MoistureChart from "../MoistureChart";
+import IrrigationControl from "../components/IrrigationControl";
+
 
 type Device = {
     id: string;
@@ -442,6 +444,18 @@ export default function Home() {
                     </div>
                 )}
 
+                {/* IRRIGATION CONTROL */}
+                {selectedSensor && (
+                    <IrrigationControl
+                        sensorCode={selectedSensor.sensor_code}
+                        moisture={
+                            readings.length > 0
+                                ? readings[readings.length - 1].moisture
+                                : 0
+                        }
+                    />
+                )}
+                
             </div>
 
         </main>
