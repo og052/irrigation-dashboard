@@ -228,6 +228,14 @@ export default function IrrigationControl({
     const [duration, setDuration] = useState(5);
     const [threshold, setThreshold] = useState(40);
 
+    /*
+     * How long to irrigate for when the "by moisture" strategy
+     * triggers. Kept separate from "duration" above, which is
+     * only for a manual Start click - otherwise editing one
+     * would silently change the other.
+     */
+    const [moistureDuration, setMoistureDuration] = useState(5);
+
     const [schedules, setSchedules] =
         useState<Schedule[]>([]);
 
@@ -399,7 +407,7 @@ export default function IrrigationControl({
             if (moistureSettings) {
                 setThreshold(Number(moistureSettings.threshold));
 
-                setDuration(
+                setMoistureDuration(
                     Number(moistureSettings.duration_minutes)
                 );
             }
@@ -596,7 +604,7 @@ export default function IrrigationControl({
                 {
                     irrigation_setting_id: irrigationSettingId,
                     threshold,
-                    duration_minutes: duration,
+                    duration_minutes: moistureDuration,
                 },
                 { onConflict: "irrigation_setting_id" }
             );
@@ -919,8 +927,8 @@ export default function IrrigationControl({
                     <button
                         onClick={() => changeMode("manual")}
                         className={`rounded-xl border p-4 text-left transition ${mode === "manual"
-                                ? "border-blue-500 bg-blue-50"
-                                : "border-slate-200 hover:bg-slate-50"
+                            ? "border-blue-500 bg-blue-50"
+                            : "border-slate-200 hover:bg-slate-50"
                             }`}
                     >
                         <p className="font-semibold text-slate-900">
@@ -935,8 +943,8 @@ export default function IrrigationControl({
                     <button
                         onClick={() => changeMode("automatic")}
                         className={`rounded-xl border p-4 text-left transition ${mode === "automatic"
-                                ? "border-blue-500 bg-blue-50"
-                                : "border-slate-200 hover:bg-slate-50"
+                            ? "border-blue-500 bg-blue-50"
+                            : "border-slate-200 hover:bg-slate-50"
                             }`}
                     >
                         <p className="font-semibold text-slate-900">
@@ -951,8 +959,8 @@ export default function IrrigationControl({
                     <button
                         onClick={() => changeMode("intelligent")}
                         className={`rounded-xl border p-4 text-left transition ${mode === "intelligent"
-                                ? "border-blue-500 bg-blue-50"
-                                : "border-slate-200 hover:bg-slate-50"
+                            ? "border-blue-500 bg-blue-50"
+                            : "border-slate-200 hover:bg-slate-50"
                             }`}
                     >
                         <p className="font-semibold text-slate-900">
@@ -1003,7 +1011,7 @@ export default function IrrigationControl({
                         Start irrigation manually for the selected sensor.
                     </p>
 
-                    <div className="mt-5 grid w-full grid-cols-2 gap-5">
+                    <div className="mt-5 grid w-full grid-cols-1 gap-5 sm:grid-cols-2">
 
                         <div className="min-w-0 rounded-xl border border-slate-200 bg-slate-50 p-5">
 
@@ -1015,8 +1023,8 @@ export default function IrrigationControl({
 
                                 <span
                                     className={`h-3 w-3 rounded-full ${isIrrigating
-                                            ? "animate-pulse bg-emerald-500"
-                                            : "bg-slate-400"
+                                        ? "animate-pulse bg-emerald-500"
+                                        : "bg-slate-400"
                                         }`}
                                 />
 
@@ -1074,7 +1082,7 @@ export default function IrrigationControl({
 
                     </div>
 
-                    <div className="mt-6 flex gap-3">
+                    <div className="mt-6 flex flex-col gap-3 sm:flex-row">
 
                         <button
                             onClick={startManualIrrigation}
@@ -1097,7 +1105,7 @@ export default function IrrigationControl({
                         <button
                             onClick={cancelCurrentIrrigation}
                             disabled={cancelling || !hasActiveCommand}
-                            className="rounded-xl border border-red-200 bg-white px-5 py-3 text-sm font-semibold text-red-600 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
+                            className="rounded-xl border border-red-200 bg-white px-5 py-3 text-sm font-semibold text-red-600 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto"
                         >
                             {cancelling ? "Stopping..." : "Stop irrigation"}
                         </button>
@@ -1130,8 +1138,8 @@ export default function IrrigationControl({
                                 changeAutomaticStrategy("moisture")
                             }
                             className={`rounded-xl border p-4 text-left transition ${automaticSubMode === "moisture"
-                                    ? "border-blue-500 bg-blue-50"
-                                    : "border-slate-200 hover:bg-slate-50"
+                                ? "border-blue-500 bg-blue-50"
+                                : "border-slate-200 hover:bg-slate-50"
                                 }`}
                         >
                             <p className="font-semibold text-slate-900">
@@ -1148,8 +1156,8 @@ export default function IrrigationControl({
                                 changeAutomaticStrategy("schedule")
                             }
                             className={`rounded-xl border p-4 text-left transition ${automaticSubMode === "schedule"
-                                    ? "border-blue-500 bg-blue-50"
-                                    : "border-slate-200 hover:bg-slate-50"
+                                ? "border-blue-500 bg-blue-50"
+                                : "border-slate-200 hover:bg-slate-50"
                                 }`}
                         >
                             <p className="font-semibold text-slate-900">
@@ -1168,7 +1176,7 @@ export default function IrrigationControl({
                     {automaticSubMode === "moisture" && (
                         <>
 
-                            <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-3">
+                            <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
 
                                 <div className="rounded-xl bg-slate-50 p-4">
 
@@ -1206,6 +1214,55 @@ export default function IrrigationControl({
                                         <span className="text-sm text-slate-500">
                                             %
                                         </span>
+
+                                    </div>
+
+                                </div>
+
+                                <div className="rounded-xl bg-slate-50 p-4">
+
+                                    <p className="text-sm text-slate-500">
+                                        Irrigation duration
+                                    </p>
+
+                                    <div className="mt-2 flex items-center gap-2">
+
+                                        <button
+                                            onClick={() =>
+                                                setMoistureDuration(
+                                                    Math.max(
+                                                        1,
+                                                        moistureDuration - 1
+                                                    )
+                                                )
+                                            }
+                                            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-300 bg-white text-base font-medium text-slate-700 transition hover:border-blue-400 hover:bg-blue-50 hover:text-blue-600"
+                                        >
+                                            −
+                                        </button>
+
+                                        <div className="flex h-8 flex-1 items-center justify-center rounded-lg border border-slate-200 bg-white px-2">
+
+                                            <span className="text-sm font-semibold text-slate-900">
+                                                {moistureDuration}
+                                            </span>
+
+                                            <span className="ml-1 text-xs text-slate-500">
+                                                min
+                                            </span>
+
+                                        </div>
+
+                                        <button
+                                            onClick={() =>
+                                                setMoistureDuration(
+                                                    moistureDuration + 1
+                                                )
+                                            }
+                                            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-300 bg-white text-base font-medium text-slate-700 transition hover:border-blue-400 hover:bg-blue-50 hover:text-blue-600"
+                                        >
+                                            +
+                                        </button>
 
                                     </div>
 
@@ -1381,8 +1438,8 @@ export default function IrrigationControl({
                                                     toggleNewDay(day)
                                                 }
                                                 className={`h-9 min-w-[44px] rounded-lg border px-3 text-sm font-medium transition ${newDays.includes(day)
-                                                        ? "border-blue-500 bg-blue-50 text-blue-600"
-                                                        : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                                                    ? "border-blue-500 bg-blue-50 text-blue-600"
+                                                    : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
                                                     }`}
                                             >
                                                 {day}
@@ -1447,8 +1504,8 @@ export default function IrrigationControl({
                                                             )
                                                         }
                                                         className={`rounded-full px-4 py-2 text-sm font-semibold ${schedule.enabled
-                                                                ? "bg-emerald-100 text-emerald-700"
-                                                                : "bg-slate-200 text-slate-600"
+                                                            ? "bg-emerald-100 text-emerald-700"
+                                                            : "bg-slate-200 text-slate-600"
                                                             }`}
                                                     >
                                                         {schedule.enabled
@@ -1895,8 +1952,8 @@ function CommandStatusCard({
 
                                         <span
                                             className={`text-xs ${highlighted
-                                                    ? "font-medium text-slate-800"
-                                                    : "text-slate-400"
+                                                ? "font-medium text-slate-800"
+                                                : "text-slate-400"
                                                 }`}
                                         >
                                             {label}
@@ -1905,8 +1962,8 @@ function CommandStatusCard({
                                         {!isLast && (
                                             <span
                                                 className={`mx-1 h-px w-3 sm:w-5 ${isDone(index + 1)
-                                                        ? "bg-emerald-500"
-                                                        : "bg-slate-200"
+                                                    ? "bg-emerald-500"
+                                                    : "bg-slate-200"
                                                     }`}
                                             />
                                         )}
@@ -1941,8 +1998,8 @@ function StrategyToggle({
         <button
             onClick={onClick}
             className={`rounded-full px-4 py-2 text-sm font-semibold ${active
-                    ? "bg-emerald-100 text-emerald-700"
-                    : "bg-slate-200 text-slate-600"
+                ? "bg-emerald-100 text-emerald-700"
+                : "bg-slate-200 text-slate-600"
                 }`}
         >
             {active ? "Enabled" : "Disabled"}
