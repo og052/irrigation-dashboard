@@ -1,8 +1,17 @@
 ﻿"use client";
 
 import { useEffect, useState } from "react";
+import dynamic from "next/dynamic";
 import MoistureChart from "../MoistureChart";
 import IrrigationControl from "../components/IrrigationControl";
+import { useTodayIrrigations } from "../useTodayIrrigations";
+import WeatherPanel from "../WeatherPanel";
+
+const DeviceLocationPicker = dynamic(
+    () => import("../DeviceLocationPicker"),
+    { ssr: false }
+);
+// Leaflet koristi window, pa mora biti ssr:false
 
 
 type Device = {
@@ -10,6 +19,8 @@ type Device = {
     name: string;
     device_code: string;
     last_seen: string | null;
+    latitude: number | null;
+    longitude: number | null;
 };
 
 type Sensor = {
@@ -30,6 +41,13 @@ export default function Home() {
     const [sensors, setSensors] = useState<Sensor[]>([]);
     const [selectedSensor, setSelectedSensor] = useState<Sensor | null>(null);
     const [readings, setReadings] = useState<Reading[]>([]);
+
+    const [editingLocationFor, setEditingLocationFor] =
+        useState<string | null>(null);
+
+    const irrigations = useTodayIrrigations({
+        sensorId: selectedSensor?.id ?? null,
+    });
 
 
     useEffect(() => {
@@ -91,6 +109,13 @@ export default function Home() {
         setSelectedSensor(sensor);
         loadReadings(sensor.id);
     }
+
+    /*
+     * The device that owns the currently selected sensor - its
+     * location is what the weather panel below the chart uses.
+     */
+    const selectedDevice =
+        devices.find((d) => d.id === selectedSensor?.device_id) ?? null;
 
     return (
         <main className="min-h-screen bg-slate-50 text-slate-900">
@@ -266,21 +291,102 @@ export default function Home() {
                                             </div>
 
 
-                                            {isDeviceOnline(device.last_seen) ? (
-                                                <div className="flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700">
-                                                    <span className="h-2 w-2 rounded-full bg-emerald-500"></span>
-                                                    Online
-                                                </div>
-                                            ) : (
-                                                <div className="flex items-center gap-2 rounded-full bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700">
-                                                    <span className="h-2 w-2 rounded-full bg-red-500"></span>
-                                                    Offline
-                                                </div>
-                                            )}
+                                            <div className="flex items-center gap-2">
+
+                                                <button
+                                                    onClick={() =>
+                                                        setEditingLocationFor(
+                                                            (current) =>
+                                                                current ===
+                                                                    device.id
+                                                                    ? null
+                                                                    : device.id
+                                                        )
+                                                    }
+                                                    className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+                                                >
+                                                    📍{" "}
+                                                    {device.latitude
+                                                        ? "Edit location"
+                                                        : "Set location"}
+                                                </button>
+
+                                                {isDeviceOnline(
+                                                    device.last_seen
+                                                ) ? (
+                                                    <div className="flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700">
+                                                        <span className="h-2 w-2 rounded-full bg-emerald-500"></span>
+                                                        Online
+                                                    </div>
+                                                ) : (
+                                                    <div className="flex items-center gap-2 rounded-full bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700">
+                                                        <span className="h-2 w-2 rounded-full bg-red-500"></span>
+                                                        Offline
+                                                    </div>
+                                                )}
+
+                                            </div>
 
                                         </div>
 
                                     </div>
+
+
+                                    {/* LOCATION PICKER */}
+
+                                    {editingLocationFor === device.id && (
+                                        <div className="border-b border-slate-100 p-5">
+                                            <DeviceLocationPicker
+                                                deviceId={device.id}
+                                                initialLatitude={
+                                                    device.latitude
+                                                }
+                                                initialLongitude={
+                                                    device.longitude
+                                                }
+                                                onSaved={(lat, lng) => {
+                                                    setDevices((prev) =>
+                                                        prev.map((d) =>
+                                                            d.id === device.id
+                                                                ? {
+                                                                    ...d,
+                                                                    latitude:
+                                                                        lat,
+                                                                    longitude:
+                                                                        lng,
+                                                                }
+                                                                : d
+                                                        )
+                                                    );
+                                                    setEditingLocationFor(
+                                                        null
+                                                    );
+                                                }}
+                                                onClose={() =>
+                                                    setEditingLocationFor(
+                                                        null
+                                                    )
+                                                }
+                                            />
+                                        </div>
+                                    )}
+
+
+                                    {/* WEATHER */}
+
+                                    {device.latitude !== null &&
+                                        device.longitude !== null && (
+                                            <div className="border-b border-slate-100 p-5">
+                                                <WeatherPanel
+                                                    latitude={
+                                                        device.latitude
+                                                    }
+                                                    longitude={
+                                                        device.longitude
+                                                    }
+                                                />
+                                            </div>
+                                        )}
 
 
                                     {/* SENSORS */}
@@ -298,8 +404,8 @@ export default function Home() {
                                                         handleSensorClick(sensor)
                                                     }
                                                     className={`w-full rounded-xl border p-4 text-left transition ${isSelected
-                                                            ? "border-blue-500 bg-blue-50 shadow-sm"
-                                                            : "border-slate-200 bg-white hover:border-blue-300 hover:bg-slate-50"
+                                                        ? "border-blue-500 bg-blue-50 shadow-sm"
+                                                        : "border-slate-200 bg-white hover:border-blue-300 hover:bg-slate-50"
                                                         }`}
                                                 >
 
@@ -309,8 +415,8 @@ export default function Home() {
 
                                                             <div
                                                                 className={`flex h-10 w-10 items-center justify-center rounded-lg ${isSelected
-                                                                        ? "bg-blue-600 text-white"
-                                                                        : "bg-slate-100 text-slate-500"
+                                                                    ? "bg-blue-600 text-white"
+                                                                    : "bg-slate-100 text-slate-500"
                                                                     }`}
                                                             >
                                                                 💧
@@ -428,11 +534,18 @@ export default function Home() {
                         </div>
 
 
-                        {/* CHART */}
+                        {/* CHART - moisture, irrigation, temperature and
+                            rain probability all overlaid, with filter
+                            chips to toggle each series. */}
                         <div className="p-6">
 
                             {readings.length > 0 ? (
-                                <MoistureChart data={readings} />
+                                <MoistureChart
+                                    data={readings}
+                                    irrigations={irrigations}
+                                    latitude={selectedDevice?.latitude}
+                                    longitude={selectedDevice?.longitude}
+                                />
                             ) : (
                                 <div className="flex h-80 items-center justify-center text-sm text-slate-400">
                                     No measurements available for this sensor.
@@ -455,7 +568,7 @@ export default function Home() {
                         }
                     />
                 )}
-                
+
             </div>
 
         </main>

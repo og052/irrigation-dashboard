@@ -15,7 +15,7 @@ export async function GET(request: Request) {
     // Pronađi devices ovog usera
     const { data: devices, error: deviceError } = await supabase
         .from("devices")
-        .select("id, name, device_code, last_seen")
+        .select("id, name, device_code, last_seen, latitude, longitude")
         .eq("user_id", userId);
 
     if (deviceError) {
