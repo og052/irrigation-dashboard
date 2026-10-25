@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useRef, useState } from "react";
 import {
@@ -177,49 +177,69 @@ async function fetchWeather(
  * label, which can disagree across mixed series types (and was
  * the cause of the wrong time tag on sensor readings).
  */
+type ChartTooltipEntry = {
+    dataKey?: string | number;
+    value?: number | string | readonly (number | string)[];
+    color?: string;
+    payload?: {
+        time?: number;
+    };
+};
+
+type ChartTooltipProps = {
+    active?: boolean;
+    payload?: readonly ChartTooltipEntry[];
+    multiDay: boolean;
+};
+
 function ChartTooltip({
     active,
     payload,
     multiDay,
-}: {
-    active?: boolean;
-    payload?: Array<{
-        dataKey?: string;
-        value?: number;
-        color?: string;
-        payload?: { time?: number };
-    }>;
-    multiDay: boolean;
-}) {
-    if (!active || !payload || payload.length === 0) return null;
+}: ChartTooltipProps) {
+    if (!active || !payload || payload.length === 0) {
+        return null;
+    }
 
     const time = payload[0]?.payload?.time;
-    const label = time ? formatDateTime(new Date(time), multiDay) : "";
+    const label =
+        typeof time === "number"
+            ? formatDateTime(new Date(time), multiDay)
+            : "";
 
     return (
         <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs shadow-lg">
-            <p className="font-semibold text-slate-700">{label}</p>
+            <p className="font-semibold text-slate-700">
+                {label}
+            </p>
 
-            {payload.map((entry) => {
-                if (entry.value === undefined || entry.value === null) {
+            {payload.map((entry, index) => {
+                const value = entry.value;
+
+                if (
+                    typeof value !== "number" ||
+                    entry.dataKey === undefined
+                ) {
                     return null;
                 }
 
                 let text = "";
 
                 if (entry.dataKey === "moisture") {
-                    text = `Moisture: ${entry.value}%`;
+                    text = `Moisture: ${value}%`;
                 } else if (entry.dataKey === "temperature") {
-                    text = `Temperature: ${entry.value}\u00b0C`;
+                    text = `Temperature: ${value}\u00b0C`;
                 } else if (entry.dataKey === "rain") {
-                    text = `Rain probability: ${entry.value}%`;
+                    text = `Rain probability: ${value}%`;
                 }
 
-                if (!text) return null;
+                if (!text) {
+                    return null;
+                }
 
                 return (
                     <p
-                        key={entry.dataKey}
+                        key={`${String(entry.dataKey)}-${index}`}
                         className="mt-0.5"
                         style={{ color: entry.color }}
                     >
@@ -498,31 +518,31 @@ export default function MoistureChart({
         color: string;
         available: boolean;
     }[] = [
-        {
-            key: "moisture",
-            label: "Moisture",
-            color: COLORS.moisture,
-            available: true,
-        },
-        {
-            key: "irrigation",
-            label: `Irrigation (${periods.length})`,
-            color: COLORS.irrigation,
-            available: periods.length > 0,
-        },
-        {
-            key: "temperature",
-            label: "Temperature",
-            color: COLORS.temperature,
-            available: hasLocation,
-        },
-        {
-            key: "rain",
-            label: "Rain probability",
-            color: COLORS.rain,
-            available: hasLocation,
-        },
-    ];
+            {
+                key: "moisture",
+                label: "Moisture",
+                color: COLORS.moisture,
+                available: true,
+            },
+            {
+                key: "irrigation",
+                label: `Irrigation (${periods.length})`,
+                color: COLORS.irrigation,
+                available: periods.length > 0,
+            },
+            {
+                key: "temperature",
+                label: "Temperature",
+                color: COLORS.temperature,
+                available: hasLocation,
+            },
+            {
+                key: "rain",
+                label: "Rain probability",
+                color: COLORS.rain,
+                available: hasLocation,
+            },
+        ];
 
     return (
         <div>
@@ -536,11 +556,10 @@ export default function MoistureChart({
                         <button
                             key={preset.label}
                             onClick={() => goToPreset(preset.days)}
-                            className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
-                                rangeDays === preset.days && dayOffset === 0
+                            className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition ${rangeDays === preset.days && dayOffset === 0
                                     ? "border-blue-500 bg-blue-50 text-blue-600"
                                     : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-                            }`}
+                                }`}
                         >
                             {preset.label}
                         </button>
@@ -637,7 +656,15 @@ export default function MoistureChart({
                         <Tooltip
                             cursor={{ strokeDasharray: "3 3" }}
                             content={(props) => (
-                                <ChartTooltip {...props} multiDay={multiDay} />
+                                <ChartTooltip
+                                    active={props.active}
+                                    payload={
+                                        props.payload as unknown as
+                                        | readonly ChartTooltipEntry[]
+                                        | undefined
+                                    }
+                                    multiDay={multiDay}
+                                />
                             )}
                         />
 
@@ -758,7 +785,7 @@ export default function MoistureChart({
                                 Math.min(
                                     tooltip.x + 12,
                                     (containerRef.current?.clientWidth ?? 0) -
-                                        190
+                                    190
                                 )
                             ),
                             top: Math.max(tooltip.y - 70, 8),
@@ -801,11 +828,10 @@ export default function MoistureChart({
                         <button
                             key={chip.key}
                             onClick={() => toggleSeries(chip.key)}
-                            className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition ${
-                                visible[chip.key]
+                            className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition ${visible[chip.key]
                                     ? "border-slate-200 bg-white text-slate-700"
                                     : "border-slate-100 bg-slate-50 text-slate-400"
-                            }`}
+                                }`}
                         >
                             <span
                                 className="h-2.5 w-2.5 rounded-full"
