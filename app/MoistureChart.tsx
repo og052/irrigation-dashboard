@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
     ComposedChart,
-    Scatter,
     Line,
     Area,
     XAxis,
@@ -48,8 +47,16 @@ const RANGE_PRESETS: { label: string; days: number }[] = [
     { label: "2D", days: 2 },
     { label: "3D", days: 3 },
     { label: "7D", days: 7 },
-    { label: "30D", days: 30 },
+    { label: "15D", days: 15 },
 ];
+
+/*
+ * You can scroll the window forward by at most this many days
+ * past today - weather forecast only reaches this far ahead.
+ */
+const MAX_FORWARD_OFFSET = 1;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 type ChartPeriod = {
     id: string;
@@ -66,6 +73,13 @@ function formatClockTime(date: Date) {
     return date.toLocaleTimeString([], {
         hour: "2-digit",
         minute: "2-digit",
+    });
+}
+
+function formatShortDate(date: Date) {
+    return date.toLocaleDateString([], {
+        day: "2-digit",
+        month: "2-digit",
     });
 }
 
@@ -97,21 +111,35 @@ function formatDuration(start: Date, end: Date) {
 
 /*
  * Fetches hourly temperature + rain probability from Open-Meteo
- * for a window of `days` days ending today (same window the
- * moisture/irrigation data uses).
+ * covering [rangeStart, rangeEnd). pastDays/forecastDays are
+ * relative to "today", not to the window itself, since that's
+ * how Open-Meteo's API works - so scrolling the window forward
+ * or backward changes how far back/ahead we ask for.
  */
 async function fetchWeather(
     latitude: number,
     longitude: number,
-    days: number
+    rangeStart: Date,
+    rangeEnd: Date
 ): Promise<WeatherPoint[] | undefined> {
-    const pastDays = Math.max(0, days - 1);
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    const pastDays = Math.max(
+        0,
+        Math.round((todayStart.getTime() - rangeStart.getTime()) / DAY_MS)
+    );
+
+    const forecastDays = Math.max(
+        1,
+        Math.round((rangeEnd.getTime() - todayStart.getTime()) / DAY_MS)
+    );
 
     const url =
         `https://api.open-meteo.com/v1/forecast` +
         `?latitude=${latitude}&longitude=${longitude}` +
         `&hourly=temperature_2m,precipitation_probability` +
-        `&past_days=${pastDays}&forecast_days=1` +
+        `&past_days=${pastDays}&forecast_days=${forecastDays}` +
         `&timezone=auto`;
 
     try {
@@ -143,6 +171,66 @@ async function fetchWeather(
     }
 }
 
+/*
+ * Custom tooltip content: reads each hovered point's OWN time
+ * from its payload rather than trusting recharts' shared axis
+ * label, which can disagree across mixed series types (and was
+ * the cause of the wrong time tag on sensor readings).
+ */
+function ChartTooltip({
+    active,
+    payload,
+    multiDay,
+}: {
+    active?: boolean;
+    payload?: Array<{
+        dataKey?: string;
+        value?: number;
+        color?: string;
+        payload?: { time?: number };
+    }>;
+    multiDay: boolean;
+}) {
+    if (!active || !payload || payload.length === 0) return null;
+
+    const time = payload[0]?.payload?.time;
+    const label = time ? formatDateTime(new Date(time), multiDay) : "";
+
+    return (
+        <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs shadow-lg">
+            <p className="font-semibold text-slate-700">{label}</p>
+
+            {payload.map((entry) => {
+                if (entry.value === undefined || entry.value === null) {
+                    return null;
+                }
+
+                let text = "";
+
+                if (entry.dataKey === "moisture") {
+                    text = `Moisture: ${entry.value}%`;
+                } else if (entry.dataKey === "temperature") {
+                    text = `Temperature: ${entry.value}\u00b0C`;
+                } else if (entry.dataKey === "rain") {
+                    text = `Rain probability: ${entry.value}%`;
+                }
+
+                if (!text) return null;
+
+                return (
+                    <p
+                        key={entry.dataKey}
+                        className="mt-0.5"
+                        style={{ color: entry.color }}
+                    >
+                        {text}
+                    </p>
+                );
+            })}
+        </div>
+    );
+}
+
 type Props = {
     data: Reading[];
     irrigations?: Irrigation[];
@@ -157,6 +245,13 @@ export default function MoistureChart({
     longitude,
 }: Props) {
     const [rangeDays, setRangeDays] = useState(1);
+
+    /*
+     * 0 = window ends today, -1 = shifted back a day,
+     * +1 = shifted forward a day (tomorrow), etc.
+     */
+    const [dayOffset, setDayOffset] = useState(0);
+
     const containerRef = useRef<HTMLDivElement>(null);
 
     const hasLocation =
@@ -191,8 +286,26 @@ export default function MoistureChart({
     } | null>(null);
 
     /*
+     * Window end is "end of today" shifted by dayOffset days;
+     * window start is rangeDays earlier. So dayOffset=0, 1D ->
+     * just today. dayOffset=-1, 1D -> just yesterday. dayOffset
+     * =1, 1D -> just tomorrow (weather forecast only).
+     */
+    const rangeEnd = new Date();
+    rangeEnd.setHours(24, 0, 0, 0);
+    rangeEnd.setDate(rangeEnd.getDate() + dayOffset);
+
+    const rangeStart = new Date(rangeEnd);
+    rangeStart.setDate(rangeStart.getDate() - rangeDays);
+
+    const rangeStartMs = rangeStart.getTime();
+    const rangeEndMs = rangeEnd.getTime();
+
+    const multiDay = rangeDays > 1;
+
+    /*
      * ---------------------------------------------------------
-     * FETCH WEATHER for the current range
+     * FETCH WEATHER for the current window
      * ---------------------------------------------------------
      */
 
@@ -205,36 +318,24 @@ export default function MoistureChart({
         let cancelled = false;
         setWeatherLoading(true);
 
-        fetchWeather(latitude as number, longitude as number, rangeDays).then(
-            (points) => {
-                if (cancelled) return;
-                if (points) setWeatherPoints(points);
-                setWeatherLoading(false);
-            }
-        );
+        fetchWeather(
+            latitude as number,
+            longitude as number,
+            rangeStart,
+            rangeEnd
+        ).then((points) => {
+            if (cancelled) return;
+            if (points) setWeatherPoints(points);
+            setWeatherLoading(false);
+        });
 
         return () => {
             cancelled = true;
         };
-    }, [hasLocation, latitude, longitude, rangeDays]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [hasLocation, latitude, longitude, rangeDays, dayOffset]);
 
     const now = new Date();
-
-    /*
-     * Range end is always "end of today"; range start is that
-     * many days earlier, at midnight - so "1D" is just today,
-     * "7D" is the last 7 days including today, etc.
-     */
-    const rangeEnd = new Date(now);
-    rangeEnd.setHours(24, 0, 0, 0);
-
-    const rangeStart = new Date(rangeEnd);
-    rangeStart.setDate(rangeStart.getDate() - rangeDays);
-
-    const rangeStartMs = rangeStart.getTime();
-    const rangeEndMs = rangeEnd.getTime();
-
-    const multiDay = rangeDays > 1;
 
     function clamp(ms: number) {
         return Math.min(Math.max(ms, rangeStartMs), rangeEndMs);
@@ -251,17 +352,17 @@ export default function MoistureChart({
             return {
                 time: date.getTime(),
                 moisture: Number(reading.moisture),
-                displayTime: formatDateTime(date, multiDay),
             };
         });
 
     const weatherData = weatherPoints
-        .filter((point) => point.time >= rangeStartMs && point.time <= rangeEndMs)
+        .filter(
+            (point) => point.time >= rangeStartMs && point.time <= rangeEndMs
+        )
         .map((point) => ({
             time: point.time,
             temperature: point.temperature,
             rain: point.precipitationProbability,
-            displayTime: formatDateTime(new Date(point.time), multiDay),
         }));
 
     const periods: ChartPeriod[] = irrigations
@@ -317,10 +418,7 @@ export default function MoistureChart({
             });
         }
 
-        return date.toLocaleDateString([], {
-            day: "2-digit",
-            month: "2-digit",
-        });
+        return formatShortDate(date);
     }
 
     function positionFromEvent(e: { clientX: number; clientY: number }) {
@@ -343,9 +441,7 @@ export default function MoistureChart({
     }
 
     function handleMouseLeave() {
-        setTooltip((current) =>
-            current && current.pinned ? current : null
-        );
+        setTooltip((current) => (current && current.pinned ? current : null));
     }
 
     function handleClick(
@@ -370,68 +466,117 @@ export default function MoistureChart({
         setVisible((prev) => ({ ...prev, [key]: !prev[key] }));
     }
 
+    function goToPreset(days: number) {
+        setRangeDays(days);
+        setDayOffset(0);
+        setTooltip(null);
+    }
+
+    function shiftWindow(delta: number) {
+        setDayOffset((prev) => Math.min(MAX_FORWARD_OFFSET, prev + delta));
+        setTooltip(null);
+    }
+
+    /*
+     * Label shown between the scroll arrows.
+     */
+    let windowLabel: string;
+
+    if (!multiDay) {
+        if (dayOffset === 0) windowLabel = "Today";
+        else if (dayOffset === -1) windowLabel = "Yesterday";
+        else if (dayOffset === 1) windowLabel = "Tomorrow";
+        else windowLabel = formatShortDate(rangeStart);
+    } else {
+        const lastDay = new Date(rangeEnd.getTime() - DAY_MS);
+        windowLabel = `${formatShortDate(rangeStart)} - ${formatShortDate(lastDay)}`;
+    }
+
     const filterChips: {
         key: SeriesKey;
         label: string;
         color: string;
         available: boolean;
     }[] = [
-            {
-                key: "moisture",
-                label: "Moisture",
-                color: COLORS.moisture,
-                available: true,
-            },
-            {
-                key: "irrigation",
-                label: `Irrigation (${periods.length})`,
-                color: COLORS.irrigation,
-                available: periods.length > 0,
-            },
-            {
-                key: "temperature",
-                label: "Temperature",
-                color: COLORS.temperature,
-                available: hasLocation,
-            },
-            {
-                key: "rain",
-                label: "Rain probability",
-                color: COLORS.rain,
-                available: hasLocation,
-            },
-        ];
+        {
+            key: "moisture",
+            label: "Moisture",
+            color: COLORS.moisture,
+            available: true,
+        },
+        {
+            key: "irrigation",
+            label: `Irrigation (${periods.length})`,
+            color: COLORS.irrigation,
+            available: periods.length > 0,
+        },
+        {
+            key: "temperature",
+            label: "Temperature",
+            color: COLORS.temperature,
+            available: hasLocation,
+        },
+        {
+            key: "rain",
+            label: "Rain probability",
+            color: COLORS.rain,
+            available: hasLocation,
+        },
+    ];
 
     return (
         <div>
 
-            {/* RANGE SELECTOR */}
+            {/* RANGE SELECTOR + DAY SCROLL */}
 
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
 
                 <div className="flex flex-wrap gap-2">
                     {RANGE_PRESETS.map((preset) => (
                         <button
                             key={preset.label}
-                            onClick={() => {
-                                setRangeDays(preset.days);
-                                setTooltip(null);
-                            }}
-                            className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition ${rangeDays === preset.days
+                            onClick={() => goToPreset(preset.days)}
+                            className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
+                                rangeDays === preset.days && dayOffset === 0
                                     ? "border-blue-500 bg-blue-50 text-blue-600"
                                     : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-                                }`}
+                            }`}
                         >
                             {preset.label}
                         </button>
                     ))}
                 </div>
 
-                {hasLocation && weatherLoading && (
-                    <span className="text-xs text-slate-400">
-                        Loading weather...
+                <div className="flex items-center gap-2">
+
+                    <button
+                        onClick={() => shiftWindow(-1)}
+                        aria-label="Previous"
+                        className="flex h-7 w-7 items-center justify-center rounded-lg border border-slate-200 bg-white text-sm text-slate-600 hover:bg-slate-50"
+                    >
+                        &lt;
+                    </button>
+
+                    <span className="min-w-[90px] text-center text-xs font-medium text-slate-600">
+                        {windowLabel}
                     </span>
-                )}
+
+                    <button
+                        onClick={() => shiftWindow(1)}
+                        disabled={dayOffset >= MAX_FORWARD_OFFSET}
+                        aria-label="Next"
+                        className="flex h-7 w-7 items-center justify-center rounded-lg border border-slate-200 bg-white text-sm text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                        &gt;
+                    </button>
+
+                    {hasLocation && weatherLoading && (
+                        <span className="text-xs text-slate-400">
+                            Loading weather...
+                        </span>
+                    )}
+
+                </div>
 
             </div>
 
@@ -446,10 +591,7 @@ export default function MoistureChart({
 
                 <ResponsiveContainer width="100%" height="100%">
                     <ComposedChart>
-                        <CartesianGrid
-                            stroke="#e5e7eb"
-                            strokeDasharray="3 3"
-                        />
+                        <CartesianGrid stroke="#e5e7eb" strokeDasharray="3 3" />
 
                         <XAxis
                             dataKey="time"
@@ -458,7 +600,6 @@ export default function MoistureChart({
                             ticks={ticks}
                             tickFormatter={tickFormatter}
                             tick={{ fill: "#374151", fontSize: 12 }}
-                            allowDuplicatedCategory={false}
                         />
 
                         {/* LEFT AXIS: percentages (moisture + rain chance) */}
@@ -480,7 +621,10 @@ export default function MoistureChart({
                                 yAxisId="temperature"
                                 orientation="right"
                                 domain={["auto", "auto"]}
-                                tick={{ fill: COLORS.temperature, fontSize: 12 }}
+                                tick={{
+                                    fill: COLORS.temperature,
+                                    fontSize: 12,
+                                }}
                                 label={{
                                     value: "\u00b0C",
                                     angle: 90,
@@ -492,18 +636,9 @@ export default function MoistureChart({
 
                         <Tooltip
                             cursor={{ strokeDasharray: "3 3" }}
-                            labelFormatter={(value) =>
-                                formatDateTime(new Date(Number(value)), multiDay)
-                            }
-                            formatter={(value, name) => {
-                                if (name === "moisture")
-                                    return [`${value}%`, "Moisture"];
-                                if (name === "temperature")
-                                    return [`${value}\u00b0C`, "Temperature"];
-                                if (name === "rain")
-                                    return [`${value}%`, "Rain probability"];
-                                return [value, name];
-                            }}
+                            content={(props) => (
+                                <ChartTooltip {...props} multiDay={multiDay} />
+                            )}
                         />
 
                         {/* IRRIGATION AREAS - hover (or tap) for details */}
@@ -568,7 +703,6 @@ export default function MoistureChart({
                                 data={weatherData}
                                 dataKey="rain"
                                 type="monotone"
-                                name="rain"
                                 stroke={COLORS.rain}
                                 strokeWidth={1}
                                 fill={COLORS.rain}
@@ -586,7 +720,6 @@ export default function MoistureChart({
                                 data={weatherData}
                                 dataKey="temperature"
                                 type="monotone"
-                                name="temperature"
                                 stroke={COLORS.temperature}
                                 strokeWidth={2}
                                 dot={false}
@@ -595,17 +728,20 @@ export default function MoistureChart({
                             />
                         )}
 
-                        {/* MOISTURE - points + connecting line, left axis */}
+                        {/* MOISTURE - line, same style as the other series,
+                            left axis */}
 
                         {visible.moisture && (
-                            <Scatter
+                            <Line
                                 yAxisId="percent"
                                 data={moistureData}
                                 dataKey="moisture"
-                                name="moisture"
-                                fill={COLORS.moisture}
-                                line={{ type: "monotone", stroke: COLORS.moisture }}
+                                type="monotone"
+                                stroke={COLORS.moisture}
+                                strokeWidth={2}
+                                dot={false}
                                 isAnimationActive={false}
+                                connectNulls
                             />
                         )}
                     </ComposedChart>
@@ -622,7 +758,7 @@ export default function MoistureChart({
                                 Math.min(
                                     tooltip.x + 12,
                                     (containerRef.current?.clientWidth ?? 0) -
-                                    190
+                                        190
                                 )
                             ),
                             top: Math.max(tooltip.y - 70, 8),
@@ -635,8 +771,7 @@ export default function MoistureChart({
                         </p>
 
                         <p className="mt-1 text-slate-600">
-                            Started:{" "}
-                            {formatDateTime(activePeriod.start, multiDay)}
+                            Started: {formatDateTime(activePeriod.start, multiDay)}
                         </p>
 
                         <p className="text-slate-600">
@@ -648,10 +783,7 @@ export default function MoistureChart({
 
                         <p className="text-slate-600">
                             Duration:{" "}
-                            {formatDuration(
-                                activePeriod.start,
-                                activePeriod.end
-                            )}
+                            {formatDuration(activePeriod.start, activePeriod.end)}
                         </p>
 
                     </div>
@@ -669,10 +801,11 @@ export default function MoistureChart({
                         <button
                             key={chip.key}
                             onClick={() => toggleSeries(chip.key)}
-                            className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition ${visible[chip.key]
+                            className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition ${
+                                visible[chip.key]
                                     ? "border-slate-200 bg-white text-slate-700"
                                     : "border-slate-100 bg-slate-50 text-slate-400"
-                                }`}
+                            }`}
                         >
                             <span
                                 className="h-2.5 w-2.5 rounded-full"
