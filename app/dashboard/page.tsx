@@ -102,7 +102,7 @@ export default function Home() {
         const difference =
             (Date.now() - new Date(lastSeen).getTime()) / 1000;
 
-        return difference < 180;
+        return difference < 720;
     }
 
     function handleSensorClick(sensor: Sensor) {
@@ -114,6 +114,56 @@ export default function Home() {
      * The device that owns the currently selected sensor - its
      * location is what the weather panel below the chart uses.
      */
+    /*
+     * Status sistema izveden iz last_seen svih uređaja.
+     */
+    const onlineCount = devices.filter((d) =>
+        isDeviceOnline(d.last_seen)
+    ).length;
+
+    const systemStatus =
+        devices.length === 0
+            ? {
+                label: "No devices",
+                description: "No devices connected yet",
+                badge: "System offline",
+                text: "text-slate-500",
+                bg: "bg-slate-100",
+                dot: "bg-slate-400",
+                icon: "–",
+            }
+            : onlineCount === devices.length
+                ? {
+                    label: "Online",
+                    description: `All ${devices.length} devices online`,
+                    badge: "System online",
+                    text: "text-emerald-600",
+                    bg: "bg-emerald-50",
+                    dot: "bg-emerald-500",
+                    icon: "✓",
+                }
+                : onlineCount > 0
+                    ? {
+                        label: "Partially online",
+                        description: `${onlineCount} of ${devices.length} devices online`,
+                        badge: "Partially online",
+                        text: "text-amber-600",
+                        bg: "bg-amber-50",
+                        dot: "bg-amber-500",
+                        icon: "!",
+                    }
+                    : {
+                        label: "Offline",
+                        description: devices.length === 1
+                            ? "Device is offline"
+                            : `All ${devices.length} devices offline`,
+                        badge: "System offline",
+                        text: "text-red-600",
+                        bg: "bg-red-50",
+                        dot: "bg-red-500",
+                        icon: "✕",
+                    };
+
     const selectedDevice =
         devices.find((d) => d.id === selectedSensor?.device_id) ?? null;
 
@@ -135,9 +185,9 @@ export default function Home() {
                     </div>
 
                     <div className="flex items-center gap-3">
-                        <div className="flex items-center gap-2 rounded-full bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700">
-                            <span className="h-2 w-2 rounded-full bg-emerald-500"></span>
-                            System online
+                        <div className={`flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium ${systemStatus.bg} ${systemStatus.text}`}>
+                            <span className={`h-2 w-2 rounded-full ${systemStatus.dot}`}></span>
+                            {systemStatus.badge}
                         </div>
                     </div>
 
@@ -219,17 +269,17 @@ export default function Home() {
                                 System status
                             </p>
 
-                            <div className="rounded-xl bg-emerald-50 px-3 py-2 text-emerald-600">
-                                ✓
+                            <div className={`rounded-xl px-3 py-2 ${systemStatus.bg} ${systemStatus.text}`}>
+                                {systemStatus.icon}
                             </div>
                         </div>
 
-                        <p className="mt-4 text-3xl font-bold text-emerald-600">
-                            Online
+                        <p className={`mt-4 text-3xl font-bold ${systemStatus.text}`}>
+                            {systemStatus.label}
                         </p>
 
                         <p className="mt-1 text-sm text-slate-500">
-                            All systems operational
+                            {systemStatus.description}
                         </p>
 
                     </div>
@@ -392,6 +442,12 @@ export default function Home() {
                                     {/* SENSORS */}
                                     <div className="space-y-3 p-5">
 
+                                        {deviceSensors.length === 0 && (
+                                            <p className="rounded-xl border border-dashed border-slate-200 p-4 text-center text-sm text-slate-400">
+                                                No sensors on this device yet.
+                                            </p>
+                                        )}
+
                                         {deviceSensors.map((sensor) => {
 
                                             const isSelected =
@@ -539,18 +595,14 @@ export default function Home() {
                             chips to toggle each series. */}
                         <div className="p-6">
 
-                            {readings.length > 0 ? (
-                                <MoistureChart
-                                    data={readings}
-                                    irrigations={irrigations}
-                                    latitude={selectedDevice?.latitude}
-                                    longitude={selectedDevice?.longitude}
-                                />
-                            ) : (
-                                <div className="flex h-80 items-center justify-center text-sm text-slate-400">
-                                    No measurements available for this sensor.
-                                </div>
-                            )}
+                            {/* Graf se prikazuje i bez mjerenja (prazne
+                                ose + vrijeme/navodnjavanje ako postoje). */}
+                            <MoistureChart
+                                data={readings}
+                                irrigations={irrigations}
+                                latitude={selectedDevice?.latitude}
+                                longitude={selectedDevice?.longitude}
+                            />
 
                         </div>
 

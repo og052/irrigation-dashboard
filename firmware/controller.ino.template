@@ -1,0 +1,616 @@
+﻿
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <time.h>
+
+// =====================================================
+// WIFI CONFIGURATION
+// =====================================================
+
+const char* WIFI_SSID = "MobileDeploy";
+const char* WIFI_PASSWORD = "Viking!!";
+
+// =====================================================
+// SERVER CONFIGURATION
+// =====================================================
+
+const char* SERVER_BASE_URL =
+    "https://irrigation-dashboard-ashy.vercel.app/api/controller";
+
+const char* CONTROLLER_ID = "CTRL-001";
+
+// =====================================================
+// HARDWARE CONFIGURATION
+// =====================================================
+
+const int VALVE_PIN = 10;
+
+// Pretpostavka: HIGH = MOSFET ukljucen.
+// Provjeri ovo prije povezivanja ventila.
+const int VALVE_ON = HIGH;
+const int VALVE_OFF = LOW;
+
+// =====================================================
+// INTERVALS
+// =====================================================
+
+const unsigned long HEARTBEAT_INTERVAL = 60000UL;
+const unsigned long COMMAND_CHECK_INTERVAL = 60000UL;
+const unsigned long ACTIVE_STATUS_INTERVAL = 5000UL;
+const unsigned long HTTP_TIMEOUT = 5000UL;
+
+// =====================================================
+// STATE
+// =====================================================
+
+unsigned long lastHeartbeat = 0;
+unsigned long lastCommandCheck = 0;
+unsigned long lastStatusCheck = 0;
+
+bool irrigationActive = false;
+
+String activeCommandId = "";
+unsigned long irrigationStartedAt = 0;
+unsigned long irrigationDurationMs = 0;
+
+// =====================================================
+// LOGGING
+// =====================================================
+
+void logMessage(const String& message) {
+  Serial.print("[");
+  Serial.print(millis() / 1000);
+  Serial.print("s] ");
+  Serial.println(message);
+}
+
+// =====================================================
+// WIFI CONNECTION
+// =====================================================
+
+void connectWiFi() {
+  if (WiFi.status() == WL_CONNECTED) {
+    return;
+  }
+
+  logMessage("Connecting to Wi-Fi...");
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  unsigned long start = millis();
+
+  while (WiFi.status() != WL_CONNECTED &&
+         millis() - start < 20000UL) {
+    delay(250);
+    Serial.print(".");
+  }
+
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    logMessage("Wi-Fi connected");
+
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    logMessage("Wi-Fi connection failed");
+  }
+}
+
+// =====================================================
+// HTTP REQUEST
+// =====================================================
+
+// Prototype: TLS encryption enabled, but certificate
+// validation is disabled. See security note below.
+
+bool httpRequest(
+    const String& url,
+    const String& method,
+    const String& body,
+    String& responseBody,
+    int& statusCode) {
+
+  if (WiFi.status() != WL_CONNECTED) {
+    statusCode = -1;
+    responseBody = "";
+    return false;
+  }
+
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  http.setTimeout(HTTP_TIMEOUT);
+
+  if (!http.begin(client, url)) {
+    statusCode = -1;
+    responseBody = "";
+    return false;
+  }
+
+  http.addHeader("Content-Type", "application/json");
+
+  if (method == "POST") {
+    statusCode = http.POST(body);
+  } else {
+    statusCode = http.GET();
+  }
+
+  responseBody = "";
+
+  if (statusCode > 0) {
+    responseBody = http.getString();
+  }
+
+  http.end();
+
+  return statusCode >= 200 && statusCode < 300;
+}
+
+// =====================================================
+// HEARTBEAT
+// =====================================================
+
+void sendHeartbeat() {
+  String url = String(SERVER_BASE_URL) + "/heartbeat";
+
+  struct tm timeInfo;
+  char timestamp[30];
+
+  JsonDocument data;
+  data["controller_id"] = CONTROLLER_ID;
+
+  if (getLocalTime(&timeInfo, 100)) {
+    strftime(timestamp, sizeof(timestamp),
+             "%Y-%m-%dT%H:%M:%S", &timeInfo);
+
+    data["timestamp"] = timestamp;
+  } else {
+    data["timestamp"] = "";
+  }
+
+  String body;
+  serializeJson(data, body);
+
+  String response;
+  int statusCode = 0;
+
+  if (httpRequest(url, "POST", body,
+                  response, statusCode)) {
+    logMessage("Heartbeat sent OK");
+  } else {
+    logMessage("Heartbeat failed: HTTP " +
+               String(statusCode));
+  }
+}
+
+// =====================================================
+// UPDATE COMMAND STATUS
+// =====================================================
+
+bool updateCommandStatus(
+    const String& commandId,
+    const String& status) {
+
+  String url = String(SERVER_BASE_URL) +
+               "/commands/status";
+
+  JsonDocument data;
+  data["command_id"] = commandId;
+  data["controller_id"] = CONTROLLER_ID;
+  data["status"] = status;
+
+  String body;
+  serializeJson(data, body);
+
+  String response;
+  int statusCode = 0;
+
+  bool ok = httpRequest(
+      url, "POST", body, response, statusCode);
+
+  if (ok) {
+    logMessage("Command " + commandId +
+               " -> " + status);
+  } else {
+    logMessage("Status update failed: HTTP " +
+               String(statusCode));
+  }
+
+  return ok;
+}
+
+// =====================================================
+// GET COMMAND STATUS
+// =====================================================
+
+String getCommandStatus(const String& commandId) {
+  String url = String(SERVER_BASE_URL) +
+      "/commands/status?command_id=" + commandId +
+      "&controller_id=" + CONTROLLER_ID;
+
+  String response;
+  int statusCode = 0;
+
+  if (!httpRequest(url, "GET", "",
+                   response, statusCode)) {
+    return "";
+  }
+
+  JsonDocument data;
+
+  if (deserializeJson(data, response)) {
+    logMessage("Invalid command status response");
+    return "";
+  }
+
+  return data["status"] | "";
+}
+
+// =====================================================
+// CLAIM COMMAND
+// =====================================================
+
+bool claimCommand(
+    const String& commandId,
+    JsonDocument& claimedCommand) {
+
+  String url = String(SERVER_BASE_URL) +
+               "/commands/claim";
+
+  JsonDocument requestData;
+  requestData["command_id"] = commandId;
+  requestData["controller_id"] = CONTROLLER_ID;
+
+  String body;
+  serializeJson(requestData, body);
+
+  String response;
+  int statusCode = 0;
+
+  if (!httpRequest(url, "POST", body,
+                   response, statusCode)) {
+    logMessage("Claim failed: HTTP " +
+               String(statusCode));
+    return false;
+  }
+
+  JsonDocument result;
+
+  if (deserializeJson(result, response)) {
+    logMessage("Invalid claim response");
+    return false;
+  }
+
+  if (!result["command"].is<JsonObject>()) {
+    logMessage("No command returned by server");
+    return false;
+  }
+
+  claimedCommand.set(result["command"]);
+  logMessage("Command claimed OK");
+
+  return true;
+}
+
+// =====================================================
+// VALVE CONTROL
+// =====================================================
+
+void openValve() {
+  digitalWrite(VALVE_PIN, VALVE_ON);
+  logMessage("VALVE OPEN");
+}
+
+void closeValve() {
+  digitalWrite(VALVE_PIN, VALVE_OFF);
+  logMessage("VALVE CLOSED");
+}
+
+// =====================================================
+// STOP ACTIVE IRRIGATION
+// =====================================================
+
+void stopActiveIrrigation(const String& finalStatus) {
+  if (!irrigationActive) {
+    closeValve();
+    return;
+  }
+
+  String commandId = activeCommandId;
+
+  // Close first for safety.
+  closeValve();
+
+  irrigationActive = false;
+  activeCommandId = "";
+
+  updateCommandStatus(commandId, finalStatus);
+}
+
+// =====================================================
+// EXECUTE COMMAND
+// =====================================================
+
+void executeCommand(JsonDocument& command) {
+  String commandId = command["id"] | "";
+  String commandType = command["command_type"] | "";
+  int durationMinutes = command["duration_minutes"] | 0;
+
+  if (commandId.isEmpty()) {
+    logMessage("Command has no ID");
+    return;
+  }
+
+  logMessage("==============================");
+  logMessage("Command: " + commandId);
+  logMessage("Type: " + commandType);
+  logMessage("Duration: " + String(durationMinutes));
+  logMessage("==============================");
+
+  // START IRRIGATION
+  if (commandType == "start_irrigation") {
+    if (irrigationActive) {
+      logMessage("Another irrigation is active");
+      updateCommandStatus(commandId, "failed");
+      return;
+    }
+
+    if (durationMinutes <= 0) {
+      logMessage("Invalid irrigation duration");
+      updateCommandStatus(commandId, "failed");
+      return;
+    }
+
+    if (!updateCommandStatus(commandId, "executing")) {
+      return;
+    }
+
+    activeCommandId = commandId;
+    irrigationStartedAt = millis();
+
+    irrigationDurationMs =
+        (unsigned long)durationMinutes * 60000UL;
+
+    irrigationActive = true;
+
+    openValve();
+
+    logMessage("Irrigation started for " +
+               String(durationMinutes) + " real minute(s)");
+  }
+
+  // STOP IRRIGATION
+  else if (commandType == "stop_irrigation") {
+    if (irrigationActive) {
+      stopActiveIrrigation("cancelled");
+    } else {
+      closeValve();
+    }
+
+    updateCommandStatus(commandId, "completed");
+  }
+
+  else {
+    logMessage("Unknown command type");
+    updateCommandStatus(commandId, "failed");
+  }
+}
+
+// =====================================================
+// MONITOR ACTIVE IRRIGATION
+// =====================================================
+
+
+void serviceActiveIrrigation() {
+  if (!irrigationActive) {
+    return;
+  }
+
+  // Provjera isteka vremena navodnjavanja
+  unsigned long elapsed = millis() - irrigationStartedAt;
+
+  if (elapsed >= irrigationDurationMs) {
+    String commandId = activeCommandId;
+
+    closeValve();
+
+    irrigationActive = false;
+    activeCommandId = "";
+
+    updateCommandStatus(commandId, "completed");
+
+    logMessage("Irrigation completed");
+    return;
+  }
+
+  // Provjera postoji li komanda u bazi
+  if (millis() - lastStatusCheck >= 1000UL) {
+    lastStatusCheck = millis();
+
+    String status = getCommandStatus(activeCommandId);
+
+    if (status == "") {
+      logMessage("Command deleted from database");
+
+      // Prvo fizički zatvori ventil
+      closeValve();
+
+      irrigationActive = false;
+      activeCommandId = "";
+      irrigationDurationMs = 0;
+
+      logMessage("Irrigation stopped");
+      return;
+    }
+
+    if (status == "cancelled" || status == "canceled") {
+      closeValve();
+
+      irrigationActive = false;
+      activeCommandId = "";
+      irrigationDurationMs = 0;
+
+      logMessage("Irrigation cancelled");
+      return;
+    }
+  }
+}
+
+
+// =====================================================
+// GET COMMANDS
+// =====================================================
+
+void getCommands() {
+  String url = String(SERVER_BASE_URL) +
+      "/commands?controller_id=" + CONTROLLER_ID;
+
+  String response;
+  int statusCode = 0;
+
+  if (!httpRequest(url, "GET", "",
+                   response, statusCode)) {
+    logMessage("Get commands failed: HTTP " +
+               String(statusCode));
+    return;
+  }
+
+  JsonDocument data;
+
+  if (deserializeJson(data, response)) {
+    logMessage("Invalid commands JSON");
+    return;
+  }
+
+  JsonArray commands = data["commands"].as<JsonArray>();
+
+  if (commands.isNull() || commands.size() == 0) {
+    logMessage("No pending commands");
+    return;
+  }
+
+  for (JsonObject item : commands) {
+    String id = item["id"] | "";
+    String status = item["status"] | "";
+
+    if (id.isEmpty() || status != "pending") {
+      continue;
+    }
+
+    JsonDocument claimedCommand;
+
+    if (claimCommand(id, claimedCommand)) {
+      executeCommand(claimedCommand);
+    }
+  }
+}
+
+// =====================================================
+// RECOVER STALE COMMANDS
+// =====================================================
+
+void recoverStaleCommands() {
+  String url = String(SERVER_BASE_URL) +
+      "/commands/recovery?controller_id=" +
+      CONTROLLER_ID + "&status=executing";
+
+  String response;
+  int statusCode = 0;
+
+  if (!httpRequest(url, "GET", "",
+                   response, statusCode)) {
+    logMessage("Recovery request failed: HTTP " +
+               String(statusCode));
+    return;
+  }
+
+  JsonDocument data;
+
+  if (deserializeJson(data, response)) {
+    logMessage("Invalid recovery response");
+    return;
+  }
+
+  JsonArray commands = data["commands"].as<JsonArray>();
+
+  if (commands.isNull() || commands.size() == 0) {
+    logMessage("No stale executing commands");
+    return;
+  }
+
+  for (JsonObject command : commands) {
+    String id = command["id"] | "";
+
+    if (!id.isEmpty()) {
+      logMessage("Recovering stale command " + id);
+      updateCommandStatus(id, "failed");
+    }
+  }
+}
+
+// =====================================================
+// SETUP
+// =====================================================
+
+void setup() {
+  Serial.begin(115200);
+
+  // Set safe output state immediately.
+  pinMode(VALVE_PIN, OUTPUT);
+  closeValve();
+
+  logMessage("ESP32 IRRIGATION CONTROLLER");
+  logMessage("Controller ID: CTRL-001");
+
+  connectWiFi();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    // Synchronize clock for ISO timestamps.
+    configTime(0, 0, "pool.ntp.org", "time.google.com");
+
+    recoverStaleCommands();
+    sendHeartbeat();
+
+    lastHeartbeat = millis();
+    lastCommandCheck = millis();
+  }
+}
+
+// =====================================================
+// MAIN LOOP
+// =====================================================
+
+void loop() {
+  if (WiFi.status() != WL_CONNECTED) {
+    connectWiFi();
+    delay(10);
+    return;
+  }
+
+  unsigned long now = millis();
+
+  if (now - lastHeartbeat >= HEARTBEAT_INTERVAL) {
+    lastHeartbeat = now;
+    sendHeartbeat();
+  }
+
+  serviceActiveIrrigation();
+
+  // Continue checking commands while irrigation is active.
+  // This allows stop commands to be discovered sooner.
+  unsigned long checkInterval = irrigationActive
+      ? 5000UL
+      : COMMAND_CHECK_INTERVAL;
+
+  if (now - lastCommandCheck >= checkInterval) {
+    lastCommandCheck = now;
+    getCommands();
+  }
+
+  delay(10);
+}

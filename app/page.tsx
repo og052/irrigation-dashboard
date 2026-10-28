@@ -39,7 +39,7 @@ export default function LoginPage() {
             // Za sada samo sačuvamo korisnika
             localStorage.setItem("user", JSON.stringify(data.user));
 
-            router.push("/dashboard");
+            router.push(data.isAdmin ? "/admin" : "/dashboard");
 
         } catch (error) {
             setError("Greška pri povezivanju sa serverom.");

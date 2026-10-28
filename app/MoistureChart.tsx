@@ -557,8 +557,8 @@ export default function MoistureChart({
                             key={preset.label}
                             onClick={() => goToPreset(preset.days)}
                             className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition ${rangeDays === preset.days && dayOffset === 0
-                                    ? "border-blue-500 bg-blue-50 text-blue-600"
-                                    : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
+                                ? "border-blue-500 bg-blue-50 text-blue-600"
+                                : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
                                 }`}
                         >
                             {preset.label}
@@ -755,6 +755,25 @@ export default function MoistureChart({
                             />
                         )}
 
+                        {/* AXIS ANCHOR - nevidljiva linija na granicama
+                            perioda; bez nje recharts ne crta oznake osa
+                            kad nema nijednog mjerenja. */}
+
+                        <Line
+                            yAxisId="percent"
+                            data={[
+                                { time: rangeStartMs, anchor: 0 },
+                                { time: rangeEndMs, anchor: 0 },
+                            ]}
+                            dataKey="anchor"
+                            stroke="none"
+                            dot={false}
+                            activeDot={false}
+                            tooltipType="none"
+                            legendType="none"
+                            isAnimationActive={false}
+                        />
+
                         {/* MOISTURE - line, same style as the other series,
                             left axis */}
 
@@ -773,6 +792,16 @@ export default function MoistureChart({
                         )}
                     </ComposedChart>
                 </ResponsiveContainer>
+
+                {/* EMPTY STATE - no moisture readings in this window */}
+
+                {moistureData.length === 0 && (
+                    <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                        <span className="rounded-lg border border-slate-200 bg-white/90 px-3 py-1.5 text-xs text-slate-500 shadow-sm">
+                            No measurements for this period
+                        </span>
+                    </div>
+                )}
 
                 {/* HOVER TOOLTIP for irrigation periods */}
 
@@ -829,8 +858,8 @@ export default function MoistureChart({
                             key={chip.key}
                             onClick={() => toggleSeries(chip.key)}
                             className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition ${visible[chip.key]
-                                    ? "border-slate-200 bg-white text-slate-700"
-                                    : "border-slate-100 bg-slate-50 text-slate-400"
+                                ? "border-slate-200 bg-white text-slate-700"
+                                : "border-slate-100 bg-slate-50 text-slate-400"
                                 }`}
                         >
                             <span
