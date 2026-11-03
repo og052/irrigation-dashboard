@@ -1,4 +1,4 @@
-﻿/*import { NextResponse } from "next/server";
+﻿import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 
 export async function GET(request: Request) {
@@ -17,8 +17,8 @@ export async function GET(request: Request) {
 
 
 
-        /*
-         * 1. Find controller/device
+        
+         //1. Find controller/device
          
 
         const { data: device, error: deviceError } = await supabase
@@ -36,8 +36,8 @@ export async function GET(request: Request) {
             );
         }
 
-        /*
-         * 2. Find sensors belonging to this controller
+        
+         //2. Find sensors belonging to this controller
          
 
         const { data: sensors, error: sensorsError } = await supabase
@@ -63,8 +63,8 @@ export async function GET(request: Request) {
 
         const sensorIds = sensors.map((sensor) => sensor.id);
 
-        /*
-         * 3. Get pending irrigation commands
+        
+        // * 3. Get pending irrigation commands
          
 
         const { data: commands, error: commandsError } = await supabase
@@ -94,8 +94,8 @@ export async function GET(request: Request) {
             );
         }
 
-        /*
-         * 4. Return commands
+        
+        // * 4. Return commands
          
 
         return NextResponse.json({
@@ -115,10 +115,10 @@ export async function GET(request: Request) {
             { status: 400 }
         );
     }
-}*/
+}
 
 
-
+/*
 
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
@@ -137,9 +137,9 @@ export async function GET(request: Request) {
             );
         }
 
-        /*
-         * 1. Find controller/device
-         */
+        
+         // 1. Find controller/device
+         
 
         const { data: device, error: deviceError } = await supabase
             .from("devices")
@@ -156,9 +156,9 @@ export async function GET(request: Request) {
             );
         }
 
-        /*
-         * 2. Find sensors belonging to this controller
-         */
+        
+        // * 2. Find sensors belonging to this controller
+         
 
         const { data: sensors, error: sensorsError } = await supabase
             .from("sensors")
@@ -184,16 +184,16 @@ export async function GET(request: Request) {
 
         const sensorIds = sensors.map((sensor) => sensor.id);
 
-        /*
-         * 3. Get pending commands that are ready to execute.
-         *
-         * scheduled_at IS NULL:
-         * Existing commands without a scheduled time remain compatible.
-         *
-         * scheduled_at <= now:
-         * Scheduled commands are returned only when their
-         * execution time has arrived.
-         */
+        
+         //* 3. Get pending commands that are ready to execute.
+        // *
+         //* scheduled_at IS NULL:
+         //* Existing commands without a scheduled time remain compatible.
+        // *
+         //* scheduled_at <= now:
+         //* Scheduled commands are returned only when their
+         //* execution time has arrived.
+         
 
         const now = new Date().toISOString();
 
@@ -226,9 +226,9 @@ export async function GET(request: Request) {
             );
         }
 
-        /*
-         * 4. Return commands ready for execution
-         */
+        
+        // * 4. Return commands ready for execution
+         
 
         return NextResponse.json({
             success: true,
@@ -245,3 +245,4 @@ export async function GET(request: Request) {
         );
     }
 }
+*/

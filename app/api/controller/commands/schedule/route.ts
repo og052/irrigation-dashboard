@@ -1,4 +1,4 @@
-﻿
+﻿/*
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
@@ -164,4 +164,4 @@ export async function POST(request: Request) {
             { status: 500 }
         );
     }
-}
+}*/

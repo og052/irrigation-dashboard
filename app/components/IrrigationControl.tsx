@@ -211,6 +211,9 @@ export default function IrrigationControl({
     sensorCode,
     moisture,
 }: Props) {
+    // Senzor može poslati npr. 32.14148055686772 - prikaz na 1 decimalu.
+    const moistureLabel = `${Number(Number(moisture).toFixed(1))}%`;
+
     const [mode, setMode] =
         useState<IrrigationMode>("manual");
 
@@ -1185,7 +1188,7 @@ export default function IrrigationControl({
                                     </p>
 
                                     <p className="mt-2 text-2xl font-bold text-slate-900">
-                                        {moisture}%
+                                        {moistureLabel}
                                     </p>
 
                                 </div>
@@ -1581,7 +1584,7 @@ export default function IrrigationControl({
 
                         <InfoCard
                             title="Soil moisture"
-                            value={`${moisture}%`}
+                            value={moistureLabel}
                         />
 
                         <InfoCard

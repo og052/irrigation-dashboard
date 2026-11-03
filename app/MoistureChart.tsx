@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
     ComposedChart,
     Line,
@@ -41,6 +41,26 @@ const COLORS = {
     temperature: "#f97316",
     rain: "#38bdf8",
 };
+
+/*
+ * Uski ekran (mobitel): rjeđe oznake na osama i bez naslova osa.
+ */
+const NARROW_QUERY = "(max-width: 639px)";
+
+function subscribeNarrow(onChange: () => void) {
+    const query = window.matchMedia(NARROW_QUERY);
+    query.addEventListener("change", onChange);
+
+    return () => query.removeEventListener("change", onChange);
+}
+
+function useIsNarrow() {
+    return useSyncExternalStore(
+        subscribeNarrow,
+        () => window.matchMedia(NARROW_QUERY).matches,
+        () => false
+    );
+}
 
 const RANGE_PRESETS: { label: string; days: number }[] = [
     { label: "1D", days: 1 },
@@ -266,6 +286,8 @@ export default function MoistureChart({
 }: Props) {
     const [rangeDays, setRangeDays] = useState(1);
 
+    const narrow = useIsNarrow();
+
     /*
      * 0 = window ends today, -1 = shifted back a day,
      * +1 = shifted forward a day (tomorrow), etc.
@@ -416,15 +438,18 @@ export default function MoistureChart({
     const ticks: number[] = [];
 
     if (!multiDay) {
-        for (let h = 0; h <= 24; h += 2) {
+        const hourStep = narrow ? 6 : 2;
+
+        for (let h = 0; h <= 24; h += hourStep) {
             ticks.push(rangeStartMs + h * 60 * 60 * 1000);
         }
     } else {
+        const dayStep = narrow ? Math.ceil(rangeDays / 4) : 1;
         const cursor = new Date(rangeStart);
 
         while (cursor.getTime() <= rangeEndMs) {
             ticks.push(cursor.getTime());
-            cursor.setDate(cursor.getDate() + 1);
+            cursor.setDate(cursor.getDate() + dayStep);
         }
     }
 
@@ -435,6 +460,7 @@ export default function MoistureChart({
             return date.toLocaleTimeString([], {
                 hour: "2-digit",
                 minute: "2-digit",
+                ...(narrow ? { hour12: false } : {}),
             });
         }
 
@@ -556,7 +582,7 @@ export default function MoistureChart({
                         <button
                             key={preset.label}
                             onClick={() => goToPreset(preset.days)}
-                            className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition ${rangeDays === preset.days && dayOffset === 0
+                            className={`rounded-lg border px-2.5 py-1.5 text-xs font-medium transition sm:px-3 ${rangeDays === preset.days && dayOffset === 0
                                 ? "border-blue-500 bg-blue-50 text-blue-600"
                                 : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
                                 }`}
@@ -603,7 +629,7 @@ export default function MoistureChart({
                 ref={containerRef}
                 style={{
                     width: "100%",
-                    height: "340px",
+                    height: narrow ? "290px" : "340px",
                     position: "relative",
                 }}
             >
@@ -618,20 +644,26 @@ export default function MoistureChart({
                             domain={[rangeStartMs, rangeEndMs]}
                             ticks={ticks}
                             tickFormatter={tickFormatter}
-                            tick={{ fill: "#374151", fontSize: 12 }}
+                            tick={{ fill: "#374151", fontSize: narrow ? 11 : 12 }}
                         />
 
                         {/* LEFT AXIS: percentages (moisture + rain chance) */}
                         <YAxis
                             yAxisId="percent"
                             domain={[0, 100]}
-                            tick={{ fill: "#374151", fontSize: 12 }}
-                            label={{
-                                value: "%",
-                                angle: -90,
-                                position: "insideLeft",
-                                fill: "#374151",
-                            }}
+                            width={narrow ? "auto" : 60}
+                            tick={{ fill: "#374151", fontSize: narrow ? 11 : 12 }}
+                            unit={narrow ? "%" : undefined}
+                            label={
+                                narrow
+                                    ? undefined
+                                    : {
+                                        value: "%",
+                                        angle: -90,
+                                        position: "insideLeft",
+                                        fill: "#374151",
+                                    }
+                            }
                         />
 
                         {/* RIGHT AXIS: temperature */}
@@ -640,16 +672,22 @@ export default function MoistureChart({
                                 yAxisId="temperature"
                                 orientation="right"
                                 domain={["auto", "auto"]}
+                                width={narrow ? "auto" : 60}
                                 tick={{
                                     fill: COLORS.temperature,
-                                    fontSize: 12,
+                                    fontSize: narrow ? 11 : 12,
                                 }}
-                                label={{
-                                    value: "\u00b0C",
-                                    angle: 90,
-                                    position: "insideRight",
-                                    fill: COLORS.temperature,
-                                }}
+                                unit={narrow ? "°" : undefined}
+                                label={
+                                    narrow
+                                        ? undefined
+                                        : {
+                                            value: "\u00b0C",
+                                            angle: 90,
+                                            position: "insideRight",
+                                            fill: COLORS.temperature,
+                                        }
+                                }
                             />
                         )}
 

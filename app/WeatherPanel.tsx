@@ -199,7 +199,7 @@ export default function WeatherPanel({ latitude, longitude }: Props) {
     const { emoji, label } = describeWeatherCode(weather.weatherCode);
 
     return (
-        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
 
             <div className="flex items-center justify-between">
 
@@ -208,7 +208,7 @@ export default function WeatherPanel({ latitude, longitude }: Props) {
                         Weather at device location
                     </p>
 
-                    <div className="mt-1 flex items-center gap-2">
+                    <div className="mt-1 flex flex-wrap items-center gap-x-2">
                         <span className="text-2xl">{emoji}</span>
 
                         <span className="text-2xl font-bold text-slate-900">
@@ -223,29 +223,32 @@ export default function WeatherPanel({ latitude, longitude }: Props) {
 
             </div>
 
-            <div className="mt-4 grid grid-cols-3 gap-3">
+            <div className="mt-4 grid grid-cols-3 gap-2 sm:gap-3">
 
-                <div className="rounded-xl bg-slate-50 p-3">
+                <div className="min-w-0 rounded-xl bg-slate-50 p-2.5 sm:p-3">
                     <p className="text-xs text-slate-500">Humidity</p>
-                    <p className="mt-1 text-lg font-semibold text-slate-900">
+                    <p className="mt-1 whitespace-nowrap text-base font-semibold text-slate-900 sm:text-lg">
                         {weather.humidity}%
                     </p>
                 </div>
 
-                <div className="rounded-xl bg-slate-50 p-3">
+                <div className="min-w-0 rounded-xl bg-slate-50 p-2.5 sm:p-3">
                     <p className="text-xs text-slate-500">
-                        Rain probability
+                        <span className="sm:hidden">Rain</span>
+                        <span className="hidden sm:inline">
+                            Rain probability
+                        </span>
                     </p>
-                    <p className="mt-1 text-lg font-semibold text-slate-900">
+                    <p className="mt-1 whitespace-nowrap text-base font-semibold text-slate-900 sm:text-lg">
                         {weather.precipitationProbability !== null
                             ? `${weather.precipitationProbability}%`
                             : "—"}
                     </p>
                 </div>
 
-                <div className="rounded-xl bg-slate-50 p-3">
+                <div className="min-w-0 rounded-xl bg-slate-50 p-2.5 sm:p-3">
                     <p className="text-xs text-slate-500">Wind</p>
-                    <p className="mt-1 text-lg font-semibold text-slate-900">
+                    <p className="mt-1 whitespace-nowrap text-base font-semibold text-slate-900 sm:text-lg">
                         {Math.round(weather.windSpeed)} km/h
                     </p>
                 </div>

@@ -1,4 +1,4 @@
-﻿/* import { NextResponse } from "next/server";
+﻿ import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 
 export async function POST(request: Request) {
@@ -17,8 +17,8 @@ export async function POST(request: Request) {
             );
         }
 
-        /*
-         * 1. Find controller
+        
+        // 1. Find controller
          
 
         const { data: device, error: deviceError } = await supabase
@@ -34,9 +34,9 @@ export async function POST(request: Request) {
             );
         }
 
-        /*
-         * 2. Find command and verify that the command
-         * belongs to a sensor connected to this controller.
+        
+        // 2. Find command and verify that the command
+         // belongs to a sensor connected to this controller.
          
 
         const { data: command, error: commandError } = await supabase
@@ -66,8 +66,8 @@ export async function POST(request: Request) {
             );
         }
 
-        /*
-         * 3. Verify controller ownership
+        
+        // * 3. Verify controller ownership
          
 
         const sensor = Array.isArray(command.sensors)
@@ -81,8 +81,8 @@ export async function POST(request: Request) {
             );
         }
 
-        /*
-         * 4. Only pending commands can be claimed.
+        
+         // 4. Only pending commands can be claimed.
          
 
         if (command.status !== "pending") {
@@ -95,8 +95,8 @@ export async function POST(request: Request) {
             );
         }
 
-        /*
-         5. Mark command as sent.
+        
+        // 5. Mark command as sent.
          
 
         const { data: updatedCommand, error: updateError } =
@@ -149,7 +149,7 @@ export async function POST(request: Request) {
         );
     }
 }
-*/
+/*
 
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
@@ -172,9 +172,9 @@ export async function POST(request: Request) {
             );
         }
 
-        /*
+        
          * 1. Find controller
-         */
+         
 
         const { data: device, error: deviceError } = await supabase
             .from("devices")
@@ -189,9 +189,9 @@ export async function POST(request: Request) {
             );
         }
 
-        /*
+        
          * 2. Find command and its sensor
-         */
+        
 
         const { data: command, error: commandError } = await supabase
             .from("irrigation_commands")
@@ -228,9 +228,9 @@ export async function POST(request: Request) {
             );
         }
 
-        /*
+        
          * 3. Verify controller ownership
-         */
+         
 
         const sensor = Array.isArray(command.sensors)
             ? command.sensors[0]
@@ -243,9 +243,9 @@ export async function POST(request: Request) {
             );
         }
 
-        /*
+        
          * 4. Only pending commands can be claimed
-         */
+         
 
         if (command.status !== "pending") {
             return NextResponse.json(
@@ -257,10 +257,10 @@ export async function POST(request: Request) {
             );
         }
 
-        /*
+        
          * 5. Do not claim a command before its scheduled time.
          * Commands without scheduled_at remain immediately eligible.
-         */
+         
 
         if (command.scheduled_at) {
             const scheduledTime = new Date(
@@ -285,13 +285,13 @@ export async function POST(request: Request) {
             }
         }
 
-        /*
+        
          * 6. Mark command as sent.
          *
          * Repeat the scheduled-time condition in the UPDATE
          * so a command cannot be claimed early if the schedule
          * changes after the lookup.
-         */
+         
 
         const now = new Date().toISOString();
 
@@ -356,4 +356,4 @@ export async function POST(request: Request) {
             { status: 400 }
         );
     }
-}
+}*/

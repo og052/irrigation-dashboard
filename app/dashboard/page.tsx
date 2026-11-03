@@ -102,7 +102,7 @@ export default function Home() {
         const difference =
             (Date.now() - new Date(lastSeen).getTime()) / 1000;
 
-        return difference < 720;
+        return difference < 180;
     }
 
     function handleSensorClick(sensor: Sensor) {
@@ -172,20 +172,20 @@ export default function Home() {
 
             {/* HEADER */}
             <header className="border-b border-slate-200 bg-white">
-                <div className="mx-auto flex max-w-7xl items-center justify-between px-8 py-5">
+                <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-4 sm:px-8 sm:py-5">
 
-                    <div>
-                        <h1 className="text-2xl font-bold tracking-tight text-slate-900">
+                    <div className="min-w-0">
+                        <h1 className="text-xl font-bold tracking-tight text-slate-900 sm:text-2xl">
                             Smart Irrigation
                         </h1>
 
-                        <p className="mt-1 text-sm text-slate-500">
+                        <p className="mt-1 text-xs text-slate-500 sm:text-sm">
                             Intelligent irrigation monitoring system
                         </p>
                     </div>
 
-                    <div className="flex items-center gap-3">
-                        <div className={`flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium ${systemStatus.bg} ${systemStatus.text}`}>
+                    <div className="flex shrink-0 items-center gap-3">
+                        <div className={`flex items-center gap-2 whitespace-nowrap rounded-full px-3 py-1.5 text-xs font-medium sm:px-4 sm:py-2 sm:text-sm ${systemStatus.bg} ${systemStatus.text}`}>
                             <span className={`h-2 w-2 rounded-full ${systemStatus.dot}`}></span>
                             {systemStatus.badge}
                         </div>
@@ -196,11 +196,11 @@ export default function Home() {
 
 
             {/* CONTENT */}
-            <div className="mx-auto max-w-7xl px-8 py-8">
+            <div className="mx-auto max-w-7xl px-4 py-6 sm:px-8 sm:py-8">
 
                 {/* PAGE TITLE */}
-                <div className="mb-8">
-                    <h2 className="text-3xl font-bold tracking-tight text-slate-900">
+                <div className="mb-6 sm:mb-8">
+                    <h2 className="text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">
                         Dashboard
                     </h2>
 
@@ -318,18 +318,18 @@ export default function Home() {
                                 >
 
                                     {/* DEVICE HEADER */}
-                                    <div className="border-b border-slate-100 bg-slate-50 px-6 py-5">
+                                    <div className="border-b border-slate-100 bg-slate-50 px-4 py-4 sm:px-6 sm:py-5">
 
-                                        <div className="flex items-center justify-between">
+                                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
 
-                                            <div className="flex items-center gap-4">
+                                            <div className="flex min-w-0 items-center gap-3 sm:gap-4">
 
-                                                <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-blue-100 text-xl">
+                                                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-100 text-lg sm:h-12 sm:w-12 sm:text-xl">
                                                     ⚙
                                                 </div>
 
-                                                <div>
-                                                    <h3 className="font-bold text-slate-900">
+                                                <div className="min-w-0">
+                                                    <h3 className="break-words font-bold text-slate-900">
                                                         {device.name}
                                                     </h3>
 
@@ -341,7 +341,7 @@ export default function Home() {
                                             </div>
 
 
-                                            <div className="flex items-center gap-2">
+                                            <div className="flex flex-wrap items-center gap-2">
 
                                                 <button
                                                     onClick={() =>
@@ -353,7 +353,7 @@ export default function Home() {
                                                                     : device.id
                                                         )
                                                     }
-                                                    className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+                                                    className="whitespace-nowrap rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
                                                 >
                                                     📍{" "}
                                                     {device.latitude
@@ -364,12 +364,12 @@ export default function Home() {
                                                 {isDeviceOnline(
                                                     device.last_seen
                                                 ) ? (
-                                                    <div className="flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700">
+                                                    <div className="flex items-center gap-2 whitespace-nowrap rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-700">
                                                         <span className="h-2 w-2 rounded-full bg-emerald-500"></span>
                                                         Online
                                                     </div>
                                                 ) : (
-                                                    <div className="flex items-center gap-2 rounded-full bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700">
+                                                    <div className="flex items-center gap-2 whitespace-nowrap rounded-full bg-red-50 px-3 py-1.5 text-xs font-semibold text-red-700">
                                                         <span className="h-2 w-2 rounded-full bg-red-500"></span>
                                                         Offline
                                                     </div>
@@ -385,7 +385,7 @@ export default function Home() {
                                     {/* LOCATION PICKER */}
 
                                     {editingLocationFor === device.id && (
-                                        <div className="border-b border-slate-100 p-5">
+                                        <div className="border-b border-slate-100 p-4 sm:p-5">
                                             <DeviceLocationPicker
                                                 deviceId={device.id}
                                                 initialLatitude={
@@ -426,7 +426,7 @@ export default function Home() {
 
                                     {device.latitude !== null &&
                                         device.longitude !== null && (
-                                            <div className="border-b border-slate-100 p-5">
+                                            <div className="border-b border-slate-100 p-4 sm:p-5">
                                                 <WeatherPanel
                                                     latitude={
                                                         device.latitude
@@ -440,7 +440,7 @@ export default function Home() {
 
 
                                     {/* SENSORS */}
-                                    <div className="space-y-3 p-5">
+                                    <div className="space-y-3 p-4 sm:p-5">
 
                                         {deviceSensors.length === 0 && (
                                             <p className="rounded-xl border border-dashed border-slate-200 p-4 text-center text-sm text-slate-400">
@@ -465,12 +465,12 @@ export default function Home() {
                                                         }`}
                                                 >
 
-                                                    <div className="flex items-center justify-between">
+                                                    <div className="flex items-center justify-between gap-3">
 
-                                                        <div className="flex items-center gap-3">
+                                                        <div className="flex min-w-0 items-center gap-3">
 
                                                             <div
-                                                                className={`flex h-10 w-10 items-center justify-center rounded-lg ${isSelected
+                                                                className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${isSelected
                                                                     ? "bg-blue-600 text-white"
                                                                     : "bg-slate-100 text-slate-500"
                                                                     }`}
@@ -478,13 +478,13 @@ export default function Home() {
                                                                 💧
                                                             </div>
 
-                                                            <div>
+                                                            <div className="min-w-0">
 
-                                                                <p className="font-semibold text-slate-900">
+                                                                <p className="truncate font-semibold text-slate-900">
                                                                     {sensor.name}
                                                                 </p>
 
-                                                                <p className="mt-1 font-mono text-xs text-slate-500">
+                                                                <p className="mt-1 truncate font-mono text-xs text-slate-500">
                                                                     {sensor.sensor_code}
                                                                 </p>
 
@@ -493,7 +493,7 @@ export default function Home() {
                                                         </div>
 
 
-                                                        <div className="text-right">
+                                                        <div className="shrink-0 text-right">
 
                                                             <p className="text-xs text-slate-400">
                                                                 Type
@@ -545,16 +545,16 @@ export default function Home() {
 
                 {/* SENSOR DETAILS */}
                 {selectedSensor && (
-                    <div className="mt-8 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+                    <div className="mt-6 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm sm:mt-8">
 
                         {/* CHART HEADER */}
-                        <div className="border-b border-slate-100 px-6 py-5">
+                        <div className="border-b border-slate-100 px-4 py-4 sm:px-6 sm:py-5">
 
-                            <div className="flex items-center justify-between">
+                            <div className="flex items-center justify-between gap-3">
 
-                                <div>
+                                <div className="min-w-0">
 
-                                    <div className="flex items-center gap-3">
+                                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
 
                                         <h2 className="text-xl font-bold text-slate-900">
                                             {selectedSensor.name}
@@ -593,7 +593,7 @@ export default function Home() {
                         {/* CHART - moisture, irrigation, temperature and
                             rain probability all overlaid, with filter
                             chips to toggle each series. */}
-                        <div className="p-6">
+                        <div className="px-3 py-4 sm:p-6">
 
                             {/* Graf se prikazuje i bez mjerenja (prazne
                                 ose + vrijeme/navodnjavanje ako postoje). */}
