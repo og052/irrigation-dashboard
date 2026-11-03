@@ -693,7 +693,7 @@ export default function MoistureChart({
 
                         <Tooltip
                             cursor={{ strokeDasharray: "3 3" }}
-                            content={(props) => (
+                            content={(props: { active?: boolean; payload?: unknown }) => (
                                 <ChartTooltip
                                     active={props.active}
                                     payload={

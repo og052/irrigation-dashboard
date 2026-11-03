@@ -255,6 +255,8 @@ export default function IrrigationControl({
     const [sensorId, setSensorId] =
         useState<string | null>(null);
 
+    const [fao, setFao] = useState<Fao56State | null>(null);
+
     const [commandOverview, setCommandOverview] =
         useState<CommandOverview>(EMPTY_COMMAND_OVERVIEW);
 
@@ -301,6 +303,7 @@ export default function IrrigationControl({
          * Reset anything that belongs to the previous sensor.
          */
         setSensorId(null);
+        setFao(null);
         setCommandOverview(EMPTY_COMMAND_OVERVIEW);
 
         try {
@@ -324,6 +327,23 @@ export default function IrrigationControl({
             }
 
             setSensorId(sensor.id);
+
+            /*
+             * FAO-56 stanje (zadnja odluka modela).
+             * Ne blokira ostatak učitavanja ako tabela još ne postoji.
+             */
+
+            const { data: faoData, error: faoError } = await supabase
+                .from("fao56_settings")
+                .select("last_decision, mm_per_minute, calibrations")
+                .eq("sensor_id", sensor.id)
+                .maybeSingle();
+
+            if (faoError) {
+                console.error("Error loading FAO-56 settings:", faoError);
+            }
+
+            setFao((faoData as Fao56State | null) ?? null);
 
             /*
              * 2. Make sure a settings row exists.
@@ -1580,78 +1600,10 @@ export default function IrrigationControl({
 
                     </div>
 
-                    <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-
-                        <InfoCard
-                            title="Soil moisture"
-                            value={moistureLabel}
-                        />
-
-                        <InfoCard
-                            title="Temperature"
-                            value="24°C"
-                        />
-
-                        <InfoCard
-                            title="Air humidity"
-                            value="61%"
-                        />
-
-                        <InfoCard
-                            title="Rain probability"
-                            value="20%"
-                        />
-
-                    </div>
-
-                    <div className="mt-6 rounded-xl border border-slate-200 p-5">
-
-                        <p className="text-sm text-slate-500">
-                            Model recommendation
-                        </p>
-
-                        <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-
-                            <div>
-
-                                <p className="font-semibold text-slate-900">
-                                    Irrigation recommended
-                                </p>
-
-                                <p className="mt-1 text-sm text-slate-500">
-                                    Predicted soil moisture is expected
-                                    to fall below the optimal range.
-                                </p>
-
-                            </div>
-
-                            <span className="rounded-full bg-blue-50 px-4 py-2 text-sm font-semibold text-blue-600">
-                                Recommended
-                            </span>
-
-                        </div>
-
-                    </div>
-
-                    <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-2">
-
-                        <InfoCard
-                            title="Predicted moisture"
-                            value="34%"
-                        />
-
-                        <InfoCard
-                            title="Recommended duration"
-                            value="4 min"
-                        />
-
-                    </div>
-
-                    <button
-                        className="mt-6 w-full rounded-xl bg-blue-600 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-700"
-                    >
-                        Apply recommendation
-                    </button>
+                    <Fao56Panel
+                        moistureLabel={moistureLabel}
+                        fao={fao}
+                    />
 
                 </div>
             )}
@@ -2029,5 +1981,149 @@ function InfoCard({
             </p>
 
         </div>
+    );
+}
+
+/*
+ * ---------------------------------------------------------
+ * FAO-56 PANEL
+ *
+ * Prikazuje zadnju odluku modela koju upisuje
+ * /api/intelligent/run (fao56_settings.last_decision).
+ * ---------------------------------------------------------
+ */
+
+type Fao56Decision = {
+    shouldIrrigate: boolean;
+    durationMinutes: number;
+    deficitMm: number;
+    rawMm: number;
+    tawMm: number;
+    et0Today: number;
+    etcToday: number;
+    rainTodayMm: number;
+    rainTomorrowMm: number;
+    source: "sensor" | "water_balance";
+    reason: string;
+    commandId: string | null;
+    at: string;
+};
+
+type Fao56State = {
+    last_decision: Fao56Decision | null;
+    mm_per_minute: number;
+    calibrations: number;
+};
+
+function Fao56Panel({
+    moistureLabel,
+    fao,
+}: {
+    moistureLabel: string;
+    fao: Fao56State | null;
+}) {
+    const d = fao?.last_decision ?? null;
+
+    return (
+        <>
+            <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+
+                <InfoCard
+                    title="Soil moisture"
+                    value={moistureLabel}
+                />
+
+                <InfoCard
+                    title="Water deficit"
+                    value={d ? `${d.deficitMm} / ${d.rawMm} mm` : "—"}
+                />
+
+                <InfoCard
+                    title="ET₀ today"
+                    value={d ? `${d.et0Today} mm` : "—"}
+                />
+
+                <InfoCard
+                    title="Rain tomorrow"
+                    value={d ? `${d.rainTomorrowMm} mm` : "—"}
+                />
+
+            </div>
+
+            <div className="mt-6 rounded-xl border border-slate-200 p-5">
+
+                <p className="text-sm text-slate-500">
+                    FAO-56 recommendation
+                    {d && (
+                        <span className="ml-2 text-slate-400">
+                            {new Date(d.at).toLocaleString()}
+                        </span>
+                    )}
+                </p>
+
+                <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+
+                    <div>
+
+                        <p className="font-semibold text-slate-900">
+                            {!d
+                                ? "No decision yet"
+                                : d.shouldIrrigate
+                                    ? `Irrigate ${d.durationMinutes} min`
+                                    : "No irrigation needed"}
+                        </p>
+
+                        <p className="mt-1 text-sm text-slate-500">
+                            {d
+                                ? d.reason
+                                : "The model runs once a day and writes its decision here."}
+                        </p>
+
+                    </div>
+
+                    {d && (
+                        <span
+                            className={`rounded-full px-4 py-2 text-sm font-semibold ${d.shouldIrrigate
+                                ? "bg-blue-50 text-blue-600"
+                                : "bg-slate-100 text-slate-600"
+                                }`}
+                        >
+                            {d.shouldIrrigate ? "Irrigate" : "Skip"}
+                        </span>
+                    )}
+
+                </div>
+
+            </div>
+
+            <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-3">
+
+                <InfoCard
+                    title="Crop water use today (ETc)"
+                    value={d ? `${d.etcToday} mm` : "—"}
+                />
+
+                <InfoCard
+                    title="Deficit source"
+                    value={
+                        !d
+                            ? "—"
+                            : d.source === "sensor"
+                                ? "Soil sensor"
+                                : "Water balance"
+                    }
+                />
+
+                <InfoCard
+                    title="Calibration"
+                    value={
+                        fao
+                            ? `${Number(fao.mm_per_minute).toFixed(2)} mm/min (${fao.calibrations}×)`
+                            : "—"
+                    }
+                />
+
+            </div>
+        </>
     );
 }

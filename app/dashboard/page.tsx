@@ -102,7 +102,7 @@ export default function Home() {
         const difference =
             (Date.now() - new Date(lastSeen).getTime()) / 1000;
 
-        return difference < 180;
+        return difference < 720;
     }
 
     function handleSensorClick(sensor: Sensor) {
