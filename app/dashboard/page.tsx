@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
+import { useRouter } from "next/navigation";
 import MoistureChart from "../MoistureChart";
 import IrrigationControl from "../components/IrrigationControl";
 import { useTodayIrrigations } from "../useTodayIrrigations";
@@ -37,6 +38,7 @@ type Reading = {
 };
 
 export default function Home() {
+    const router = useRouter();
     const [devices, setDevices] = useState<Device[]>([]);
     const [sensors, setSensors] = useState<Sensor[]>([]);
     const [selectedSensor, setSelectedSensor] = useState<Sensor | null>(null);
@@ -94,6 +96,16 @@ export default function Home() {
         if (response.ok) {
             setReadings(result.readings || []);
         }
+    }
+
+    function handleLogout() {
+        try {
+            localStorage.removeItem("user");
+        } catch {
+            // localStorage nedostupan - svejedno idemo na login
+        }
+
+        router.replace("/");
     }
 
     function isDeviceOnline(lastSeen: string | null) {
@@ -189,6 +201,14 @@ export default function Home() {
                             <span className={`h-2 w-2 rounded-full ${systemStatus.dot}`}></span>
                             {systemStatus.badge}
                         </div>
+
+                        <button
+                            type="button"
+                            onClick={handleLogout}
+                            className="whitespace-nowrap rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 sm:px-4 sm:py-2 sm:text-sm"
+                        >
+                            Log out
+                        </button>
                     </div>
 
                 </div>
