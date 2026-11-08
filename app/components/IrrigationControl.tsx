@@ -335,7 +335,7 @@ export default function IrrigationControl({
 
             const { data: faoData, error: faoError } = await supabase
                 .from("fao56_settings")
-                .select("last_decision, mm_per_minute, calibrations")
+                .select("last_decision, mm_per_minute, calibrations, max_minutes, plan")
                 .eq("sensor_id", sensor.id)
                 .maybeSingle();
 
@@ -1993,19 +1993,35 @@ function InfoCard({
  * ---------------------------------------------------------
  */
 
+type Fao56Slot = {
+    at: string;
+    label: string;
+    valid: boolean;
+    note: string;
+};
+
+type Fao56Cycle = {
+    at: string;
+    label: string;
+    minutes: number;
+    purpose: string;
+    status: "planned" | "sent" | "skipped";
+    note?: string | null;
+};
+
 type Fao56Decision = {
     shouldIrrigate: boolean;
-    durationMinutes: number;
+    totalMinutes?: number;
     deficitMm: number;
+    deficitEndTomorrowMm?: number;
     rawMm: number;
-    tawMm: number;
-    et0Today: number;
-    etcToday: number;
-    rainTodayMm: number;
-    rainTomorrowMm: number;
+    etcRestMm?: number;
+    rainTonightMm?: number;
+    rainTomorrowMm?: number;
+    maxTempTomorrow?: number | null;
     source: "sensor" | "water_balance";
+    slots?: Fao56Slot[];
     reason: string;
-    commandId: string | null;
     at: string;
 };
 
@@ -2013,7 +2029,19 @@ type Fao56State = {
     last_decision: Fao56Decision | null;
     mm_per_minute: number;
     calibrations: number;
+    max_minutes: number | null;
+    plan: Fao56Cycle[] | null;
 };
+
+const CYCLE_STATUS: Record<Fao56Cycle["status"], { label: string; cls: string }> = {
+    planned: { label: "Planned", cls: "bg-blue-50 text-blue-600" },
+    sent: { label: "Started", cls: "bg-emerald-50 text-emerald-700" },
+    skipped: { label: "Skipped", cls: "bg-slate-100 text-slate-500" },
+};
+
+function mm(value: number | undefined) {
+    return typeof value === "number" ? `${value} mm` : "—";
+}
 
 function Fao56Panel({
     moistureLabel,
@@ -2023,6 +2051,9 @@ function Fao56Panel({
     fao: Fao56State | null;
 }) {
     const d = fao?.last_decision ?? null;
+    const slots = Array.isArray(d?.slots) ? d.slots : [];
+    const plan = Array.isArray(fao?.plan) ? fao.plan : [];
+    const chosenTimes = new Set(plan.map((c) => c.at));
 
     return (
         <>
@@ -2034,18 +2065,18 @@ function Fao56Panel({
                 />
 
                 <InfoCard
-                    title="Water deficit"
+                    title="Water deficit / threshold"
                     value={d ? `${d.deficitMm} / ${d.rawMm} mm` : "—"}
                 />
 
                 <InfoCard
-                    title="ET₀ today"
-                    value={d ? `${d.et0Today} mm` : "—"}
+                    title="Rain tonight"
+                    value={mm(d?.rainTonightMm)}
                 />
 
                 <InfoCard
                     title="Rain tomorrow"
-                    value={d ? `${d.rainTomorrowMm} mm` : "—"}
+                    value={mm(d?.rainTomorrowMm)}
                 />
 
             </div>
@@ -2053,10 +2084,10 @@ function Fao56Panel({
             <div className="mt-6 rounded-xl border border-slate-200 p-5">
 
                 <p className="text-sm text-slate-500">
-                    FAO-56 recommendation
+                    FAO-56 plan
                     {d && (
                         <span className="ml-2 text-slate-400">
-                            {new Date(d.at).toLocaleString()}
+                            planned {new Date(d.at).toLocaleString()}
                         </span>
                     )}
                 </p>
@@ -2067,16 +2098,16 @@ function Fao56Panel({
 
                         <p className="font-semibold text-slate-900">
                             {!d
-                                ? "No decision yet"
+                                ? "No schedule yet"
                                 : d.shouldIrrigate
-                                    ? `Irrigate ${d.durationMinutes} min`
+                                    ? `${plan.length} irrigation(s) planned · ${d.totalMinutes ?? 0} min total`
                                     : "No irrigation needed"}
                         </p>
 
                         <p className="mt-1 text-sm text-slate-500">
                             {d
                                 ? d.reason
-                                : "The model runs once a day and writes its decision here."}
+                                : "The model runs every evening at 20:00 and plans up to 3 irrigations for tonight and tomorrow."}
                         </p>
 
                     </div>
@@ -2088,29 +2119,101 @@ function Fao56Panel({
                                 : "bg-slate-100 text-slate-600"
                                 }`}
                         >
-                            {d.shouldIrrigate ? "Irrigate" : "Skip"}
+                            {d.shouldIrrigate ? "Scheduled" : "Skip"}
                         </span>
                     )}
 
                 </div>
+
+                {plan.length > 0 && (
+                    <div className="mt-4 border-t border-slate-100 pt-4">
+
+                        <p className="text-sm text-slate-500">
+                            Irrigation plan
+                        </p>
+
+                        <ul className="mt-2 space-y-2">
+                            {plan.map((cycle) => (
+                                <li
+                                    key={cycle.at}
+                                    className="flex items-start justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2 text-sm"
+                                >
+                                    <span>
+                                        <span className="font-medium text-slate-900">
+                                            {cycle.label} · {cycle.minutes} min
+                                        </span>
+                                        <span className="block text-xs text-slate-500">
+                                            {cycle.note ?? cycle.purpose}
+                                        </span>
+                                    </span>
+
+                                    <span
+                                        className={`shrink-0 rounded-full px-3 py-1 text-xs font-semibold ${CYCLE_STATUS[cycle.status]?.cls ?? ""}`}
+                                    >
+                                        {CYCLE_STATUS[cycle.status]?.label ?? cycle.status}
+                                    </span>
+                                </li>
+                            ))}
+                        </ul>
+
+                    </div>
+                )}
+
+                {slots.length > 0 && (
+                    <div className="mt-4 border-t border-slate-100 pt-4">
+
+                        <p className="text-sm text-slate-500">
+                            Considered time slots
+                        </p>
+
+                        <ul className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                            {slots.map((slot) => {
+                                const chosen = chosenTimes.has(slot.at);
+
+                                return (
+                                    <li
+                                        key={slot.at}
+                                        className={`rounded-lg px-3 py-2 text-sm ${chosen
+                                            ? "border border-blue-500 bg-blue-50"
+                                            : slot.valid
+                                                ? "bg-slate-50"
+                                                : "bg-slate-50 text-slate-400 line-through"
+                                            }`}
+                                    >
+                                        <span className="font-medium">
+                                            {slot.label}
+                                        </span>
+                                        {chosen && (
+                                            <span className="ml-2 text-xs font-semibold text-blue-600">
+                                                ✓ chosen
+                                            </span>
+                                        )}
+                                        <span className="block text-xs text-slate-500">
+                                            {slot.note}
+                                        </span>
+                                    </li>
+                                );
+                            })}
+                        </ul>
+
+                    </div>
+                )}
 
             </div>
 
             <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-3">
 
                 <InfoCard
-                    title="Crop water use today (ETc)"
-                    value={d ? `${d.etcToday} mm` : "—"}
+                    title="Crop water use until tomorrow night"
+                    value={mm(d?.etcRestMm)}
                 />
 
                 <InfoCard
-                    title="Deficit source"
+                    title="Max temperature tomorrow"
                     value={
-                        !d
-                            ? "—"
-                            : d.source === "sensor"
-                                ? "Soil sensor"
-                                : "Water balance"
+                        typeof d?.maxTempTomorrow === "number"
+                            ? `${d.maxTempTomorrow}°C`
+                            : "—"
                     }
                 />
 
