@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
 type IrrigationMode = "manual" | "automatic" | "intelligent";
@@ -122,6 +122,9 @@ const HISTORY_COLUMNS = `
 `;
 
 const COMMAND_POLL_INTERVAL_MS = 5000;
+
+// Zahtjev prema bazi koji traje duže od ovoga se prekida (ne visi zauvijek).
+const LOAD_TIMEOUT_MS = 10000;
 
 const STRATEGY_LABELS = {
     moisture: "By moisture",
@@ -282,6 +285,13 @@ export default function IrrigationControl({
         commandOverview.current?.status === "executing";
 
     const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState<string | null>(null);
+
+    /*
+     * Svako učitavanje dobija broj. Odgovor starijeg učitavanja
+     * (npr. za prethodno izabrani senzor) se ignoriše.
+     */
+    const loadIdRef = useRef(0);
     const [saving, setSaving] = useState(false);
     const [starting, setStarting] = useState(false);
     const [cancelling, setCancelling] = useState(false);
@@ -297,7 +307,12 @@ export default function IrrigationControl({
     }, [sensorCode]);
 
     async function loadIrrigationSettings() {
+        const loadId = ++loadIdRef.current;
+        const isCurrent = () => loadId === loadIdRef.current;
+        const timeout = () => AbortSignal.timeout(LOAD_TIMEOUT_MS);
+
         setLoading(true);
+        setLoadError(null);
 
         /*
          * Reset anything that belongs to the previous sensor.
@@ -311,165 +326,163 @@ export default function IrrigationControl({
              * 1. Find sensor by sensor code
              */
 
-            const { data: sensor, error: sensorError } =
-                await supabase
-                    .from("sensors")
-                    .select("id")
-                    .eq("sensor_code", sensorCode)
-                    .single();
+            const { data: sensor, error: sensorError } = await supabase
+                .from("sensors")
+                .select("id")
+                .eq("sensor_code", sensorCode)
+                .abortSignal(timeout())
+                .single();
 
-            if (sensorError) {
-                console.error(
-                    "Error loading sensor:",
-                    sensorError
-                );
+            if (!isCurrent()) return;
+
+            if (sensorError || !sensor) {
+                console.error("Error loading sensor:", sensorError);
+                setLoadError("Sensor could not be loaded.");
                 return;
             }
 
             setSensorId(sensor.id);
 
             /*
-             * FAO-56 stanje (zadnja odluka modela).
-             * Ne blokira ostatak učitavanja ako tabela još ne postoji.
+             * 2. Istovremeno: FAO-56 stanje i postavke navodnjavanja
+             * (red s postavkama se pravi samo ako još ne postoji).
              */
 
-            const { data: faoData, error: faoError } = await supabase
-                .from("fao56_settings")
-                .select("last_decision, mm_per_minute, calibrations, max_minutes, plan")
-                .eq("sensor_id", sensor.id)
-                .maybeSingle();
-
-            if (faoError) {
-                console.error("Error loading FAO-56 settings:", faoError);
-            }
-
-            setFao((faoData as Fao56State | null) ?? null);
-
-            /*
-             * 2. Make sure a settings row exists.
-             * ignoreDuplicates = do nothing if it already
-             * exists, so concurrent calls (React Strict Mode)
-             * never fail and never overwrite existing data.
-             */
-
-            const { error: ensureError } = await supabase
-                .from("irrigation_settings")
-                .upsert(
-                    {
-                        sensor_id: sensor.id,
-                        mode: "manual",
-                        automatic_strategy: "moisture",
-                        active_strategy: "none",
-                    },
-                    {
-                        onConflict: "sensor_id",
-                        ignoreDuplicates: true,
-                    }
-                );
-
-            if (ensureError) {
-                console.error(
-                    "Error creating irrigation settings:",
-                    ensureError.message
-                );
-                return;
-            }
-
-            /*
-             * 3. Load irrigation settings
-             */
-
-            const { data: settings, error: settingsError } =
-                await supabase
-                    .from("irrigation_settings")
-                    .select(
-                        "id, mode, automatic_strategy, active_strategy"
-                    )
+            const [faoResult, settings] = await Promise.all([
+                supabase
+                    .from("fao56_settings")
+                    .select("last_decision, mm_per_minute, calibrations, max_minutes, plan")
                     .eq("sensor_id", sensor.id)
-                    .single();
+                    .abortSignal(timeout())
+                    .maybeSingle(),
+                loadOrCreateSettings(sensor.id, timeout),
+            ]);
 
-            if (settingsError) {
-                console.error(
-                    "Error loading irrigation settings:",
-                    settingsError.message
-                );
+            if (!isCurrent()) return;
+
+            if (faoResult.error) {
+                console.error("Error loading FAO-56 settings:", faoResult.error);
+            }
+
+            setFao((faoResult.data as Fao56State | null) ?? null);
+
+            if (!settings) {
+                setLoadError("Irrigation settings could not be loaded.");
                 return;
             }
 
             setIrrigationSettingId(settings.id);
             setMode(settings.mode as IrrigationMode);
-
-            setAutomaticSubMode(
-                settings.automatic_strategy as AutomaticSubMode
-            );
-
-            setActiveStrategy(
-                settings.active_strategy as ActiveStrategy
-            );
+            setAutomaticSubMode(settings.automatic_strategy as AutomaticSubMode);
+            setActiveStrategy(settings.active_strategy as ActiveStrategy);
 
             /*
-             * 4. Load moisture settings
+             * 3. Istovremeno: postavke vlage i rasporedi
              */
 
-            const {
-                data: moistureSettings,
-                error: moistureError,
-            } = await supabase
-                .from("irrigation_moisture_settings")
-                .select("threshold, duration_minutes")
-                .eq("irrigation_setting_id", settings.id)
-                .maybeSingle();
+            const [moistureResult, scheduleResult] = await Promise.all([
+                supabase
+                    .from("irrigation_moisture_settings")
+                    .select("threshold, duration_minutes")
+                    .eq("irrigation_setting_id", settings.id)
+                    .abortSignal(timeout())
+                    .maybeSingle(),
+                supabase
+                    .from("irrigation_schedules")
+                    .select(SCHEDULE_COLUMNS)
+                    .eq("irrigation_setting_id", settings.id)
+                    .order("start_time", { ascending: true })
+                    .abortSignal(timeout()),
+            ]);
 
-            if (moistureError) {
-                console.error(
-                    "Error loading moisture settings:",
-                    moistureError
-                );
+            if (!isCurrent()) return;
+
+            if (moistureResult.error) {
+                console.error("Error loading moisture settings:", moistureResult.error);
             }
 
-            if (moistureSettings) {
-                setThreshold(Number(moistureSettings.threshold));
-
-                setMoistureDuration(
-                    Number(moistureSettings.duration_minutes)
-                );
+            if (moistureResult.data) {
+                setThreshold(Number(moistureResult.data.threshold));
+                setMoistureDuration(Number(moistureResult.data.duration_minutes));
             }
 
-            /*
-             * 5. Load schedules
-             */
-
-            const {
-                data: scheduleData,
-                error: scheduleError,
-            } = await supabase
-                .from("irrigation_schedules")
-                .select(SCHEDULE_COLUMNS)
-                .eq("irrigation_setting_id", settings.id)
-                .order("start_time", { ascending: true });
-
-            if (scheduleError) {
-                console.error(
-                    "Error loading schedules:",
-                    scheduleError
-                );
+            if (scheduleResult.error) {
+                console.error("Error loading schedules:", scheduleResult.error);
             }
 
-            if (scheduleData) {
+            if (scheduleResult.data) {
                 setSchedules(
-                    (scheduleData as ScheduleRow[]).map(
-                        mapScheduleRow
-                    )
+                    (scheduleResult.data as ScheduleRow[]).map(mapScheduleRow)
                 );
             }
         } catch (error) {
-            console.error(
-                "Unexpected irrigation settings error:",
-                error
-            );
+            console.error("Unexpected irrigation settings error:", error);
+
+            if (isCurrent()) {
+                setLoadError("Loading took too long or failed.");
+            }
         } finally {
-            setLoading(false);
+            if (isCurrent()) {
+                setLoading(false);
+            }
         }
+    }
+
+    /*
+     * Postavke senzora: prvo samo čitanje; upis (upsert) samo
+     * ako red još ne postoji - ne piše se u bazu pri svakom kliku.
+     */
+    async function loadOrCreateSettings(
+        sensorId: string,
+        timeout: () => AbortSignal
+    ) {
+        const columns = "id, mode, automatic_strategy, active_strategy";
+
+        const existing = await supabase
+            .from("irrigation_settings")
+            .select(columns)
+            .eq("sensor_id", sensorId)
+            .abortSignal(timeout())
+            .maybeSingle();
+
+        if (existing.error) {
+            console.error("Error loading irrigation settings:", existing.error.message);
+            return null;
+        }
+
+        if (existing.data) return existing.data;
+
+        const { error: ensureError } = await supabase
+            .from("irrigation_settings")
+            .upsert(
+                {
+                    sensor_id: sensorId,
+                    mode: "manual",
+                    automatic_strategy: "moisture",
+                    active_strategy: "none",
+                },
+                { onConflict: "sensor_id", ignoreDuplicates: true }
+            )
+            .abortSignal(timeout());
+
+        if (ensureError) {
+            console.error("Error creating irrigation settings:", ensureError.message);
+            return null;
+        }
+
+        const created = await supabase
+            .from("irrigation_settings")
+            .select(columns)
+            .eq("sensor_id", sensorId)
+            .abortSignal(timeout())
+            .single();
+
+        if (created.error) {
+            console.error("Error loading irrigation settings:", created.error.message);
+            return null;
+        }
+
+        return created.data;
     }
 
     /*
@@ -494,12 +507,24 @@ export default function IrrigationControl({
              */
             if (document.hidden) return;
 
-            const overview = await fetchCommandOverview(
-                currentSensorId
-            );
+            const [overview, faoResult] = await Promise.all([
+                fetchCommandOverview(currentSensorId),
+                // FAO-56 plan se mijenja kad se ciklus izvrši ili preskoči.
+                supabase
+                    .from("fao56_settings")
+                    .select("last_decision, mm_per_minute, calibrations, max_minutes, plan")
+                    .eq("sensor_id", currentSensorId)
+                    .maybeSingle(),
+            ]);
 
-            if (!cancelled && overview !== undefined) {
+            if (cancelled) return;
+
+            if (overview !== undefined) {
                 setCommandOverview(overview);
+            }
+
+            if (!faoResult.error && faoResult.data) {
+                setFao(faoResult.data as Fao56State);
             }
         }
 
@@ -896,6 +921,26 @@ export default function IrrigationControl({
                     <p className="text-sm text-slate-500">
                         Loading irrigation settings...
                     </p>
+                </div>
+            </section>
+        );
+    }
+
+    if (loadError) {
+        return (
+            <section className="mt-8">
+                <div className="flex flex-col gap-3 rounded-2xl border border-red-200 bg-white p-6 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+                    <p className="text-sm text-red-600">
+                        {loadError}
+                    </p>
+
+                    <button
+                        type="button"
+                        onClick={() => loadIrrigationSettings()}
+                        className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                    >
+                        Try again
+                    </button>
                 </div>
             </section>
         );

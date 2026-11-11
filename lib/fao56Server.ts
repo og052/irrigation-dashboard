@@ -178,14 +178,110 @@ export async function createCommand(
 // Ciklus koji kasni više od ovoga (npr. kontroler je bio offline) se preskače.
 const MAX_CYCLE_DELAY_MS = 2 * 3600_000;
 
+// Komanda koju kontroler nije preuzeo/završio u ovom roku smatra se zaglavljenom.
+const STALE_COMMAND_MS = 30 * 60_000;
+
+type BlockingCommand = {
+    id: string;
+    status: string;
+    source: string | null;
+    scheduled_at: string | null;
+    created_at: string;
+    started_at: string | null;
+    duration_minutes: number | null;
+};
+
+/*
+ * Komanda koja blokira ciklus. Zaglavljene komande (kontroler ih nije
+ * preuzeo ili završio u razumnom roku) se označe kao failed, a stara
+ * zakazana intelligent komanda se otkaže - da ne blokiraju plan zauvijek.
+ * Vraća opis blokade ili null ako je put slobodan.
+ */
+async function resolveBlockingCommand(
+    supabase: Db,
+    sensorId: string,
+    now: number
+): Promise<string | null> {
+    const { data, error } = await supabase
+        .from("irrigation_commands")
+        .select("id, status, source, scheduled_at, created_at, started_at, duration_minutes")
+        .eq("sensor_id", sensorId)
+        .in("status", ["pending", "sent", "executing"]);
+
+    if (error) throw error;
+
+    let blocking: string | null = null;
+
+    for (const cmd of (data ?? []) as BlockingCommand[]) {
+        const scheduled = cmd.scheduled_at ? new Date(cmd.scheduled_at).getTime() : null;
+        const since = scheduled ?? new Date(cmd.created_at).getTime();
+
+        // Stara zakazana FAO-56 komanda (prethodna verzija) - zamjenjuje je plan.
+        if (cmd.status === "pending" && cmd.source === "intelligent" && scheduled && scheduled > now) {
+            await setCommandStatus(supabase, cmd.id, "pending", "cancelled");
+            continue;
+        }
+
+        if (cmd.status === "executing") {
+            const started = cmd.started_at ? new Date(cmd.started_at).getTime() : since;
+            const limit = (Number(cmd.duration_minutes) || 0) * 60_000 + STALE_COMMAND_MS;
+
+            if (now - started > limit) {
+                await setCommandStatus(supabase, cmd.id, "executing", "failed");
+                continue;
+            }
+
+            blocking = "zalijevanje je u toku";
+            continue;
+        }
+
+        // pending / sent koje kontroler nije obradio
+        if (now - since > STALE_COMMAND_MS) {
+            await setCommandStatus(supabase, cmd.id, cmd.status, "failed");
+            continue;
+        }
+
+        blocking = `čeka komandu u statusu "${cmd.status}"`;
+    }
+
+    return blocking;
+}
+
+async function setCommandStatus(supabase: Db, id: string, from: string, to: string) {
+    const update: Record<string, string> = { status: to };
+
+    if (to === "failed" || to === "cancelled") {
+        update.completed_at = new Date().toISOString();
+    }
+
+    const { error } = await supabase
+        .from("irrigation_commands")
+        .update(update)
+        .eq("id", id)
+        .eq("status", from);
+
+    if (error) throw error;
+}
+
+export type DispatchResult = {
+    sensor_id: string;
+    action: string;
+    cycle?: string;
+};
+
 /*
  * Izvršavanje plana. Poziva ga /api/controller/commands pri svakom
  * upitu kontrolera (svake minute) - model se NE pokreće ponovo.
  * Za svaki senzor u intelligent režimu: ako je planirani ciklus na redu
  * i nema aktivne komande -> provjera senzora -> komanda ili preskok.
+ * Rezultat se vraća u odgovoru rute (polje fao56) radi lakše provjere.
  */
-export async function dispatchDueCycles(supabase: Db, sensorIds: string[]) {
-    if (sensorIds.length === 0) return;
+export async function dispatchDueCycles(
+    supabase: Db,
+    sensorIds: string[]
+): Promise<DispatchResult[]> {
+    const results: DispatchResult[] = [];
+    if (sensorIds.length === 0) return results;
 
     const { data: active, error: activeError } = await supabase
         .from("irrigation_settings")
@@ -197,7 +293,7 @@ export async function dispatchDueCycles(supabase: Db, sensorIds: string[]) {
     if (activeError) throw activeError;
 
     const intelligentIds = (active ?? []).map((r) => r.sensor_id as string);
-    if (intelligentIds.length === 0) return;
+    if (intelligentIds.length === 0) return results;
 
     const { data: rows, error } = await supabase
         .from("fao56_settings")
@@ -218,32 +314,66 @@ export async function dispatchDueCycles(supabase: Db, sensorIds: string[]) {
             (c) => c.status === "planned" && new Date(c.at).getTime() <= now
         );
 
-        if (!cycle) continue;
+        if (!cycle) {
+            const next = plan.find((c) => c.status === "planned");
+            results.push({
+                sensor_id: settings.sensor_id,
+                action: next ? `sljedeći ciklus ${next.at}` : "nema planiranih ciklusa",
+            });
+            continue;
+        }
+
+        const previousNote = cycle.note ?? null;
+        let action: string;
 
         if (now - new Date(cycle.at).getTime() > MAX_CYCLE_DELAY_MS) {
             cycle.status = "skipped";
-            cycle.note = "Propušteno (kontroler nije bio dostupan).";
+            cycle.note = "Propušteno (kontroler nije bio dostupan više od 2 h).";
+            action = "preskočeno (zakašnjenje)";
         } else {
-            // Prethodni ciklus / ručno zalijevanje još traje - čekamo.
-            if (await activeCommand(supabase, settings.sensor_id)) continue;
+            const blocking = await resolveBlockingCommand(
+                supabase,
+                settings.sensor_id,
+                now
+            );
 
-            const moisture = await latestMoisture(supabase, settings.sensor_id, 60);
-
-            if (
-                moisture !== null &&
-                shouldSkipBeforeStart(settings, moisture, cycle.minutes)
-            ) {
-                cycle.status = "skipped";
-                cycle.note = `Tlo je već vlažno (${moisture}%) - preskočeno.`;
+            if (blocking) {
+                cycle.note = `Čeka: ${blocking}.`;
+                action = `čeka (${blocking})`;
             } else {
-                cycle.commandId = await createCommand(
-                    supabase,
-                    settings.sensor_id,
-                    cycle.minutes
-                );
-                cycle.status = "sent";
+                const moisture = await latestMoisture(supabase, settings.sensor_id, 60);
+
+                if (
+                    moisture !== null &&
+                    shouldSkipBeforeStart(settings, moisture, cycle.minutes)
+                ) {
+                    cycle.status = "skipped";
+                    cycle.note = `Tlo je već vlažno (${moisture}%) - preskočeno.`;
+                    action = "preskočeno (vlažno tlo)";
+                } else {
+                    const commandId = await createCommand(
+                        supabase,
+                        settings.sensor_id,
+                        cycle.minutes
+                    );
+
+                    if (commandId) {
+                        cycle.commandId = commandId;
+                        cycle.status = "sent";
+                        cycle.note = null;
+                        action = `komanda ${cycle.minutes} min`;
+                    } else {
+                        cycle.note = "Čeka: komanda nije upisana (druga aktivna komanda).";
+                        action = "čeka (upis komande)";
+                    }
+                }
             }
         }
+
+        results.push({ sensor_id: settings.sensor_id, action, cycle: cycle.at });
+
+        // Upis samo kad se nešto promijenilo (ne svake minute dok ciklus čeka).
+        if (cycle.status === "planned" && cycle.note === previousNote) continue;
 
         // Uslov na last_run_date sprječava da se pregazi novi plan.
         let update = supabase
@@ -258,6 +388,8 @@ export async function dispatchDueCycles(supabase: Db, sensorIds: string[]) {
         const { error: updateError } = await update;
         if (updateError) throw updateError;
     }
+
+    return results;
 }
 
 /*

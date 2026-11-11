@@ -67,10 +67,13 @@ export async function GET(request: Request) {
         const sensorIds = sensors.map((sensor) => sensor.id);
 
         // FAO-56 plan - greška ovdje ne smije blokirati ostale komande.
+        let fao56: unknown = null;
+
         try {
-            await dispatchDueCycles(getAdminClient(), sensorIds);
+            fao56 = await dispatchDueCycles(getAdminClient(), sensorIds);
         } catch (error) {
             console.error("FAO56 DISPATCH ERROR:", error);
+            fao56 = { error: String((error as { message?: string })?.message ?? error) };
         }
 
         // 3. Pending komande kojima je došlo vrijeme
@@ -106,6 +109,7 @@ export async function GET(request: Request) {
             success: true,
             controller_id: controllerId,
             commands: commands ?? [],
+            fao56, // dijagnostika plana (kontroler ovo polje ignoriše)
         });
     } catch (error) {
         console.error("COMMAND REQUEST ERROR:", error);

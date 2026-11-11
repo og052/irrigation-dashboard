@@ -1,24 +1,24 @@
 ﻿/*
-* FAO-56 vodni bilans tla (Allen et al., FAO Irrigation and Drainage Paper 56).
-*
-*   deficit = deficit + ET0 * Kc - efektivna kiša - navodnjavanje
-*
-* Model se pokreće JEDNOM dnevno, uveče (20:00), i pravi PLAN od 0-3
-* zalijevanja za večeras i sutra:
-*   1. trenutni deficit iz senzora vlage (ili vodnog bilansa ako nema očitanja)
-*   2. satna simulacija deficita do kraja sutrašnjeg dana (ET0, kiša)
-*   3. glavno zalijevanje: večeras 21-23h ili sutra 04-07h
-*      - termin s kišom u narednih 6 h se preskače
-*      - tlo već ispod praga -> najraniji slobodni termin
-*      - inače termin s najmanjim isparavanjem; jutro ima prednost
-*   4. ako treba više od max_minutes -> dodatni ciklus nakon pauze
-*   5. ako bi deficit sutra popodne ponovo prešao prag (vruć dan) ->
-*      dodatno zalijevanje sutra 16-18h
-* Ciklusi se izvršavaju kad dođe vrijeme (dispatchDueCycles u fao56Server.ts),
-* uz provjeru senzora neposredno prije - ako je pala kiša, ciklus se preskače.
-*
-* Protok vode nije poznat, pa se mm -> minute uči iz senzora (mm_per_minute).
-*/
+ * FAO-56 vodni bilans tla (Allen et al., FAO Irrigation and Drainage Paper 56).
+ *
+ *   deficit = deficit + ET0 * Kc - efektivna kiša - navodnjavanje
+ *
+ * Model se pokreće JEDNOM dnevno, uveče (20:00), i pravi PLAN od 0-3
+ * zalijevanja za večeras i sutra:
+ *   1. trenutni deficit iz senzora vlage (ili vodnog bilansa ako nema očitanja)
+ *   2. satna simulacija deficita do kraja sutrašnjeg dana (ET0, kiša)
+ *   3. glavno zalijevanje: večeras 21-23h ili sutra 04-07h
+ *      - termin s kišom u narednih 6 h se preskače
+ *      - tlo već ispod praga -> najraniji slobodni termin
+ *      - inače termin s najmanjim isparavanjem; jutro ima prednost
+ *   4. ako treba više od max_minutes -> dodatni ciklus nakon pauze
+ *   5. ako bi deficit sutra popodne ponovo prešao prag (vruć dan) ->
+ *      dodatno zalijevanje sutra 16-18h
+ * Ciklusi se izvršavaju kad dođe vrijeme (dispatchDueCycles u fao56Server.ts),
+ * uz provjeru senzora neposredno prije - ako je pala kiša, ciklus se preskače.
+ *
+ * Protok vode nije poznat, pa se mm -> minute uči iz senzora (mm_per_minute).
+ */
 
 export type Fao56Settings = {
     sensor_id: string;
@@ -95,13 +95,12 @@ const AFTERNOON_HOURS = [16, 17, 18]; // sutra popodne (samo vrući dani)
 const RAIN_AFTER_HOURS = 6; // kiša u ovom periodu nakon termina ...
 const RAIN_SKIP_MM = 2; // ... veća od ovoga čini termin nepotrebnim
 const SOAK_MINUTES = 45; // pauza između dva uzastopna ciklusa
+const HORIZON_HOURS = 28; // od 20h do kraja sutrašnjeg dana
 
 const clamp = (v: number, min: number, max: number) =>
     Math.min(Math.max(v, min), max);
 
 const round = (v: number) => Math.round(v * 100) / 100;
-
-const hh = (h: number) => `${String(h).padStart(2, "0")}:00`;
 
 export async function fetchForecast(
     latitude: number,
@@ -150,6 +149,34 @@ function localIsoToUtcMs(local: string, offsetSeconds: number) {
 function localHourToUtcMs(date: string, hour: number, offsetSeconds: number) {
     const [y, m, d] = date.split("-").map(Number);
     return Date.UTC(y, m - 1, d, hour) - offsetSeconds * 1000;
+}
+
+/** Lokalni datum ("YYYY-MM-DD") i sat za UTC ms. */
+function localParts(ms: number, offsetSeconds: number) {
+    const local = new Date(ms + offsetSeconds * 1000);
+    return {
+        date: local.toISOString().slice(0, 10),
+        hour: local.getUTCHours(),
+        minute: local.getUTCMinutes(),
+    };
+}
+
+/** Oznaka termina u odnosu na trenutak pokretanja: "večeras 21:00", "sutra 05:00"... */
+function slotLabel(ms: number, nowMs: number, offsetSeconds: number) {
+    const t = localParts(ms, offsetSeconds);
+    const now = localParts(nowMs, offsetSeconds);
+    const tomorrow = localParts(nowMs + 24 * 3600_000, offsetSeconds).date;
+    const time = `${String(t.hour).padStart(2, "0")}:${String(t.minute).padStart(2, "0")}`;
+
+    if (t.date === now.date) {
+        return `${t.hour >= 18 ? "večeras" : "danas"} ${time}`;
+    }
+
+    if (t.date === tomorrow) {
+        return `sutra ${time}`;
+    }
+
+    return `${t.date} ${time}`;
 }
 
 /** Male kiše (<2 mm) uglavnom ispare; od veće ~80% uđe u tlo. */
@@ -249,9 +276,12 @@ export function planIrrigation(
     const maxMinutes = Number(s.max_minutes) || 60;
     const offset = f.utcOffsetSeconds;
 
-    const startToday = localHourToUtcMs(f.dates[0], 0, offset);
-    const midnight = localHourToUtcMs(f.dates[1], 0, offset);
-    const endTomorrow = localHourToUtcMs(f.dates[1], 24, offset);
+    // Vremenski okvir računamo od trenutka pokretanja, pa model radi
+    // ispravno bez obzira na to kada je cron pokrenut (20h, ponoć...).
+    const nowLocal = localParts(nowMs, offset);
+    const startToday = localHourToUtcMs(nowLocal.date, 0, offset);
+    const midnight = localHourToUtcMs(nowLocal.date, 24, offset);
+    const endTomorrow = nowMs + HORIZON_HOURS * 3600_000;
 
     // 1. Deficit sada.
     const deficit =
@@ -285,28 +315,24 @@ export function planIrrigation(
             // Isparavanje oko termina; večer blago kažnjena (jutro ima prednost).
             loss:
                 et0Between(f, at, at + 2 * 3600_000) +
-                (at < midnight ? 0.05 : 0),
+                (localParts(at, offset).hour >= 18 ? 0.05 : 0),
         };
     };
 
     // 2. Glavni termin: večeras ili sutra ujutro.
-    const mainCandidates = [
-        ...EVENING_HOURS.map((h) => ({
-            at: localHourToUtcMs(f.dates[0], h, offset),
-            label: `večeras ${hh(h)}`,
-        })),
-        ...MORNING_HOURS.map((h) => ({
-            at: localHourToUtcMs(f.dates[1], h, offset),
-            label: `sutra ${hh(h)}`,
-        })),
-    ]
-        .filter((c) => c.at > nowMs)
-        .map((c) => evaluate(c.at, c.label, []));
+    // Večernji i jutarnji termini u narednih 24 h.
+    const mainCandidates = f.hourly
+        .filter((p) => {
+            if (p.at <= nowMs || p.at > nowMs + 24 * 3600_000) return false;
+            const hour = localParts(p.at, offset).hour;
+            return EVENING_HOURS.includes(hour) || MORNING_HOURS.includes(hour);
+        })
+        .map((p) => evaluate(p.at, slotLabel(p.at, nowMs, offset), []));
 
     const tonightRain = rainBetween(f, nowMs, midnight);
-    const tomorrowRain = rainBetween(f, midnight, endTomorrow);
+    const tomorrowRain = rainBetween(f, midnight, midnight + 24 * 3600_000);
     const tomorrowTemps = f.hourly
-        .filter((p) => p.at >= midnight && p.at < endTomorrow)
+        .filter((p) => p.at >= midnight && p.at < midnight + 24 * 3600_000)
         .map((p) => p.temperature);
 
     const slots: SlotOption[] = mainCandidates.map((c) => ({
@@ -388,7 +414,7 @@ export function planIrrigation(
         main.minutes,
         urgent
             ? "tlo je već ispod praga - najraniji termin bez kiše"
-            : main.at < midnight
+            : localParts(main.at, offset).hour >= 18
                 ? "najmanje isparavanja, bez kiše nakon termina"
                 : "jutro bez kiše, voda dostupna prije dnevne vrućine"
     );
@@ -404,10 +430,7 @@ export function planIrrigation(
 
         previousCapped = c.neededMinutes > maxMinutes;
 
-        const local = new Date(next + offset * 1000);
-        const label =
-            `${next < midnight ? "večeras" : "sutra"} ` +
-            `${String(local.getUTCHours()).padStart(2, "0")}:${String(local.getUTCMinutes()).padStart(2, "0")}`;
+        const label = slotLabel(next, nowMs, offset);
 
         addCycle(next, label, c.minutes, "nastavak - jedno zalijevanje je ograničeno na " + maxMinutes + " min");
         next += (c.minutes + SOAK_MINUTES) * 60_000;
@@ -415,11 +438,16 @@ export function planIrrigation(
 
     // 4. Vruć dan: da li deficit sutra popodne ponovo prelazi prag?
     if (plan.length < MAX_CYCLES) {
-        for (const h of AFTERNOON_HOURS) {
-            const at = localHourToUtcMs(f.dates[1], h, offset);
-            if (at <= next) continue;
+        const afternoon = f.hourly.filter(
+            (p) =>
+                p.at > next &&
+                p.at < endTomorrow &&
+                AFTERNOON_HOURS.includes(localParts(p.at, offset).hour)
+        );
 
-            const c = evaluate(at, `sutra ${hh(h)}`, irrigations);
+        for (const p of afternoon) {
+            const at = p.at;
+            const c = evaluate(at, slotLabel(at, nowMs, offset), irrigations);
 
             if (c.depletion >= raw && c.valid && c.minutes >= MIN_MINUTES) {
                 addCycle(at, c.label, c.minutes, "deficit sutra popodne ponovo prelazi prag (vruć dan)");
