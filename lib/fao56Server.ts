@@ -7,7 +7,7 @@ import {
 } from "@/lib/fao56";
 
 /*
- * Serverske funkcije za FAO-56: /api/intelligent/run (plan, jednom dnevno)
+ * Serverske funkcije za FAO-56: /api/intelligent/run (plan, svakih 6 h)
  * i dispatchDueCycles (izvršavanje plana, poziva ga ruta kontrolera).
  * Koristi service role ključ - samo na serveru, nikad u browseru.
  */
@@ -122,33 +122,6 @@ export async function latestMoisture(
 
     const value = data ? Number(data.moisture) : NaN;
     return Number.isFinite(value) ? value : null;
-}
-
-/** Aktivna komanda (pending/sent/executing) za senzor, ako postoji. */
-export async function activeCommand(supabase: Db, sensorId: string) {
-    const { data, error } = await supabase
-        .from("irrigation_commands")
-        .select("id, status, source")
-        .eq("sensor_id", sensorId)
-        .in("status", ["pending", "sent", "executing"])
-        .limit(1)
-        .maybeSingle();
-
-    if (error) throw error;
-
-    return data as { id: string; status: string; source: string } | null;
-}
-
-/** Otkaže zakazano intelligent zalijevanje koje još nije poslano. */
-export async function cancelPendingIntelligent(supabase: Db, commandId: string) {
-    const { error } = await supabase
-        .from("irrigation_commands")
-        .update({ status: "cancelled" })
-        .eq("id", commandId)
-        .eq("status", "pending")
-        .eq("source", "intelligent");
-
-    if (error) throw error;
 }
 
 /** Komanda koju kontroler preuzima odmah. */
@@ -375,15 +348,15 @@ export async function dispatchDueCycles(
         // Upis samo kad se nešto promijenilo (ne svake minute dok ciklus čeka).
         if (cycle.status === "planned" && cycle.note === previousNote) continue;
 
-        // Uslov na last_run_date sprječava da se pregazi novi plan.
+        // Uslov na last_run_at sprječava da se pregazi novi plan.
         let update = supabase
             .from("fao56_settings")
             .update({ plan })
             .eq("sensor_id", settings.sensor_id);
 
-        update = settings.last_run_date
-            ? update.eq("last_run_date", settings.last_run_date)
-            : update.is("last_run_date", null);
+        update = settings.last_run_at
+            ? update.eq("last_run_at", settings.last_run_at)
+            : update.is("last_run_at", null);
 
         const { error: updateError } = await update;
         if (updateError) throw updateError;
@@ -393,28 +366,38 @@ export async function dispatchDueCycles(
 }
 
 /*
- * Uči mm/min: vlaga prije zalijevanja vs. 30 min - 3 h nakon.
+ * Uči mm/min iz završenih zalijevanja: vlaga prije vs. 30 min - 3 h nakon.
+ *
+ * Čita iz irrigation_history, jer trigger u bazi završenu komandu prebaci
+ * u historiju i obriše je iz irrigation_commands. Koristi STVARNO trajanje
+ * (ended_at - started_at), a ne zadano. Uči iz svih zalijevanja (ručnih,
+ * automatskih, intelligent) - protok ne zavisi od režima.
+ * Usput upiše moisture_before / moisture_after u historiju.
  * Mijenja `settings` na licu mjesta da odluka koristi novu vrijednost.
  */
 export async function calibrate(supabase: Db, settings: Fao56Settings) {
     const cutoff = new Date(Date.now() - 45 * 60_000).toISOString();
 
-    const { data: commands, error } = await supabase
-        .from("irrigation_commands")
-        .select("id, started_at, completed_at, duration_minutes")
+    const { data: rows, error } = await supabase
+        .from("irrigation_history")
+        .select("id, started_at, ended_at, duration")
         .eq("sensor_id", settings.sensor_id)
-        .eq("source", "intelligent")
         .eq("status", "completed")
         .eq("calibrated", false)
-        .lte("completed_at", cutoff);
+        .not("ended_at", "is", null)
+        .lte("ended_at", cutoff)
+        .order("ended_at", { ascending: true })
+        .limit(20);
 
     if (error) throw error;
 
-    for (const cmd of commands ?? []) {
-        const completed = new Date(cmd.completed_at).getTime();
-        const started = cmd.started_at
-            ? new Date(cmd.started_at).getTime()
-            : completed - cmd.duration_minutes * 60_000;
+    for (const row of rows ?? []) {
+        const ended = new Date(row.ended_at).getTime();
+        const started = row.started_at
+            ? new Date(row.started_at).getTime()
+            : ended - Number(row.duration) * 60_000;
+
+        const actualMinutes = (ended - started) / 60_000;
 
         const { data: before } = await supabase
             .from("sensor_data")
@@ -430,18 +413,18 @@ export async function calibrate(supabase: Db, settings: Fao56Settings) {
             .from("sensor_data")
             .select("moisture")
             .eq("sensor_id", settings.sensor_id)
-            .gte("created_at", new Date(completed + 30 * 60_000).toISOString())
-            .lte("created_at", new Date(completed + 3 * 3600_000).toISOString())
+            .gte("created_at", new Date(ended + 30 * 60_000).toISOString())
+            .lte("created_at", new Date(ended + 3 * 3600_000).toISOString())
             .order("created_at", { ascending: true })
             .limit(1)
             .maybeSingle();
 
-        if (before && after) {
+        if (before && after && actualMinutes > 0) {
             const learned = learnMmPerMinute(
                 settings,
                 Number(before.moisture),
                 Number(after.moisture),
-                Number(cmd.duration_minutes)
+                actualMinutes
             );
 
             if (learned !== null) {
@@ -461,9 +444,15 @@ export async function calibrate(supabase: Db, settings: Fao56Settings) {
         }
 
         // Označi kao obrađeno i kad nema podataka, da se ne pokušava stalno.
-        await supabase
-            .from("irrigation_commands")
-            .update({ calibrated: true })
-            .eq("id", cmd.id);
+        const { error: markError } = await supabase
+            .from("irrigation_history")
+            .update({
+                calibrated: true,
+                moisture_before: before ? Number(before.moisture) : null,
+                moisture_after: after ? Number(after.moisture) : null,
+            })
+            .eq("id", row.id);
+
+        if (markError) throw markError;
     }
 }

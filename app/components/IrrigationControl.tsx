@@ -2057,13 +2057,13 @@ type Fao56Cycle = {
 type Fao56Decision = {
     shouldIrrigate: boolean;
     totalMinutes?: number;
+    windowLabel?: string;
     deficitMm: number;
-    deficitEndTomorrowMm?: number;
+    deficitEndWindowMm?: number;
     rawMm: number;
-    etcRestMm?: number;
-    rainTonightMm?: number;
-    rainTomorrowMm?: number;
-    maxTempTomorrow?: number | null;
+    etcWindowMm?: number;
+    rainWindowMm?: number;
+    maxTempWindow?: number | null;
     source: "sensor" | "water_balance";
     slots?: Fao56Slot[];
     reason: string;
@@ -2115,13 +2115,13 @@ function Fao56Panel({
                 />
 
                 <InfoCard
-                    title="Rain tonight"
-                    value={mm(d?.rainTonightMm)}
+                    title="Period"
+                    value={d?.windowLabel ?? "—"}
                 />
 
                 <InfoCard
-                    title="Rain tomorrow"
-                    value={mm(d?.rainTomorrowMm)}
+                    title="Rain in period"
+                    value={mm(d?.rainWindowMm)}
                 />
 
             </div>
@@ -2152,7 +2152,7 @@ function Fao56Panel({
                         <p className="mt-1 text-sm text-slate-500">
                             {d
                                 ? d.reason
-                                : "The model runs every evening at 20:00 and plans up to 3 irrigations for tonight and tomorrow."}
+                                : "The model runs every 6 hours (00, 06, 12, 18h) and plans irrigation for the next 6 hours."}
                         </p>
 
                     </div>
@@ -2249,15 +2249,15 @@ function Fao56Panel({
             <div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-3">
 
                 <InfoCard
-                    title="Crop water use until tomorrow night"
-                    value={mm(d?.etcRestMm)}
+                    title="Crop water use in period"
+                    value={mm(d?.etcWindowMm)}
                 />
 
                 <InfoCard
-                    title="Max temperature tomorrow"
+                    title="Max temperature in period"
                     value={
-                        typeof d?.maxTempTomorrow === "number"
-                            ? `${d.maxTempTomorrow}°C`
+                        typeof d?.maxTempWindow === "number"
+                            ? `${d.maxTempWindow}°C`
                             : "—"
                     }
                 />
