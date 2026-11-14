@@ -2038,13 +2038,6 @@ function InfoCard({
  * ---------------------------------------------------------
  */
 
-type Fao56Slot = {
-    at: string;
-    label: string;
-    valid: boolean;
-    note: string;
-};
-
 type Fao56Cycle = {
     at: string;
     label: string;
@@ -2065,7 +2058,6 @@ type Fao56Decision = {
     rainWindowMm?: number;
     maxTempWindow?: number | null;
     source: "sensor" | "water_balance";
-    slots?: Fao56Slot[];
     reason: string;
     at: string;
 };
@@ -2096,9 +2088,7 @@ function Fao56Panel({
     fao: Fao56State | null;
 }) {
     const d = fao?.last_decision ?? null;
-    const slots = Array.isArray(d?.slots) ? d.slots : [];
     const plan = Array.isArray(fao?.plan) ? fao.plan : [];
-    const chosenTimes = new Set(plan.map((c) => c.at));
 
     return (
         <>
@@ -2199,46 +2189,6 @@ function Fao56Panel({
                                     </span>
                                 </li>
                             ))}
-                        </ul>
-
-                    </div>
-                )}
-
-                {slots.length > 0 && (
-                    <div className="mt-4 border-t border-slate-100 pt-4">
-
-                        <p className="text-sm text-slate-500">
-                            Considered time slots
-                        </p>
-
-                        <ul className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
-                            {slots.map((slot) => {
-                                const chosen = chosenTimes.has(slot.at);
-
-                                return (
-                                    <li
-                                        key={slot.at}
-                                        className={`rounded-lg px-3 py-2 text-sm ${chosen
-                                            ? "border border-blue-500 bg-blue-50"
-                                            : slot.valid
-                                                ? "bg-slate-50"
-                                                : "bg-slate-50 text-slate-400 line-through"
-                                            }`}
-                                    >
-                                        <span className="font-medium">
-                                            {slot.label}
-                                        </span>
-                                        {chosen && (
-                                            <span className="ml-2 text-xs font-semibold text-blue-600">
-                                                ✓ chosen
-                                            </span>
-                                        )}
-                                        <span className="block text-xs text-slate-500">
-                                            {slot.note}
-                                        </span>
-                                    </li>
-                                );
-                            })}
                         </ul>
 
                     </div>
