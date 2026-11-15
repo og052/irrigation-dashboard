@@ -1,6 +1,6 @@
 ﻿import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
-import { dispatchDueCycles, getAdminClient } from "@/lib/fao56Server";
+import { dispatchDueCycles, errorMessage, getAdminClient } from "@/lib/fao56Server";
 
 export const dynamic = "force-dynamic";
 
@@ -73,7 +73,7 @@ export async function GET(request: Request) {
             fao56 = await dispatchDueCycles(getAdminClient(), sensorIds);
         } catch (error) {
             console.error("FAO56 DISPATCH ERROR:", error);
-            fao56 = { error: String((error as { message?: string })?.message ?? error) };
+            fao56 = { error: errorMessage(error) };
         }
 
         // 3. Pending komande kojima je došlo vrijeme

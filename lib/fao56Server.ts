@@ -27,6 +27,30 @@ export function getAdminClient() {
 
 export type Db = ReturnType<typeof getAdminClient>;
 
+/**
+ * Čitljiva poruka greške. Supabase greške su objekti ({ message, details,
+ * hint, code }), pa bi String(error) dao samo "[object Object]".
+ */
+export function errorMessage(error: unknown): string {
+    if (error instanceof Error) return error.message;
+
+    if (error && typeof error === "object") {
+        const e = error as Record<string, unknown>;
+        const parts = [e.message, e.details, e.hint, e.code ? `code ${e.code}` : null]
+            .filter((part) => typeof part === "string" && part.length > 0);
+
+        if (parts.length > 0) return parts.join(" | ");
+
+        try {
+            return JSON.stringify(error);
+        } catch {
+            // nastavi ispod
+        }
+    }
+
+    return String(error);
+}
+
 /** Bearer CRON_SECRET - Vercel cron ga šalje automatski. */
 export function isAuthorized(request: Request) {
     const secret = process.env.CRON_SECRET;

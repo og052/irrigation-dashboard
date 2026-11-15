@@ -3,6 +3,7 @@ import { fetchForecast, planIrrigation } from "@/lib/fao56";
 import {
     activeSensorIds,
     calibrate,
+    errorMessage,
     getAdminClient,
     isAuthorized,
     latestMoisture,
@@ -64,7 +65,7 @@ export async function GET(request: Request) {
             results.push(await runForSensor(supabase, sensorId, force));
         } catch (e) {
             console.error("FAO56 run failed for", sensorId, e);
-            results.push({ sensor_id: sensorId, error: String(e) });
+            results.push({ sensor_id: sensorId, error: errorMessage(e) });
         }
     }
 
@@ -94,7 +95,15 @@ async function runForSensor(supabase: Db, sensorId: string, force: boolean) {
 
     const forecast = await fetchForecast(location.latitude, location.longitude);
 
-    await calibrate(supabase, settings);
+    // Kalibracija nije neophodna za odluku - greška ne zaustavlja plan.
+    let calibrationError: string | null = null;
+
+    try {
+        await calibrate(supabase, settings);
+    } catch (e) {
+        calibrationError = errorMessage(e);
+        console.error("FAO56 calibration failed for", sensorId, e);
+    }
 
     const moisture = await latestMoisture(supabase, sensorId, 180);
     const decision = planIrrigation(settings, moisture, forecast, now);
@@ -117,5 +126,10 @@ async function runForSensor(supabase: Db, sensorId: string, force: boolean) {
 
     if (error) throw error;
 
-    return { sensor_id: sensorId, moisture, decision };
+    return {
+        sensor_id: sensorId,
+        moisture,
+        decision,
+        ...(calibrationError ? { calibration_error: calibrationError } : {}),
+    };
 }

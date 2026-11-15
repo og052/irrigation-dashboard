@@ -123,6 +123,22 @@ export default function Home() {
     }
 
     /*
+     * Nova očitanja izabranog senzora - osvježavanje svake minute
+     * (inače bi se nova očitanja vidjela tek nakon ponovnog klika).
+     */
+    const selectedSensorId = selectedSensor?.id ?? null;
+
+    useEffect(() => {
+        if (!selectedSensorId) return;
+
+        const interval = setInterval(() => {
+            if (!document.hidden) loadReadings(selectedSensorId);
+        }, 60_000);
+
+        return () => clearInterval(interval);
+    }, [selectedSensorId]);
+
+    /*
      * The device that owns the currently selected sensor - its
      * location is what the weather panel below the chart uses.
      */
