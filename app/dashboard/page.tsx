@@ -5,7 +5,7 @@ import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import MoistureChart from "../MoistureChart";
 import IrrigationControl from "../components/IrrigationControl";
-import { useTodayIrrigations } from "../useTodayIrrigations";
+import { useIrrigations } from "../useTodayIrrigations";
 import WeatherPanel from "../WeatherPanel";
 
 const DeviceLocationPicker = dynamic(
@@ -47,8 +47,11 @@ export default function Home() {
     const [editingLocationFor, setEditingLocationFor] =
         useState<string | null>(null);
 
-    const irrigations = useTodayIrrigations({
+    // Isti period kao očitanja vlage (31 dan), +1 dan zbog razlike
+    // vremenskih zona između browsera i lokacije senzora.
+    const irrigations = useIrrigations({
         sensorId: selectedSensor?.id ?? null,
+        days: 32,
     });
 
 
@@ -603,7 +606,7 @@ export default function Home() {
                                     </div>
 
                                     <p className="mt-1 text-sm text-slate-500">
-                                        Soil moisture measurements · Today
+                                        Soil moisture, weather and irrigation plan
                                     </p>
 
                                 </div>
@@ -626,18 +629,19 @@ export default function Home() {
                         </div>
 
 
-                        {/* CHART - moisture, irrigation, temperature and
-                            rain probability all overlaid, with filter
-                            chips to toggle each series. */}
+                        {/* CHART - tri panela (vlaga, temperatura, kiša),
+                            3 dana s listanjem, prag i plan aktivnog režima. */}
                         <div className="px-3 py-4 sm:p-6">
 
                             {/* Graf se prikazuje i bez mjerenja (prazne
                                 ose + vrijeme/navodnjavanje ako postoje). */}
                             <MoistureChart
+                                key={selectedSensor.id}
                                 data={readings}
                                 irrigations={irrigations}
                                 latitude={selectedDevice?.latitude}
                                 longitude={selectedDevice?.longitude}
+                                sensorId={selectedSensor.id}
                             />
 
                         </div>

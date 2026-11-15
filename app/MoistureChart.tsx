@@ -1,18 +1,38 @@
 ﻿"use client";
 
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { supabase } from "@/lib/supabase";
 import {
-    ComposedChart,
-    Line,
-    Area,
-    XAxis,
-    YAxis,
-    CartesianGrid,
-    Tooltip,
-    ResponsiveContainer,
-    ReferenceArea,
-    ReferenceLine,
-} from "recharts";
+    DAY_MS,
+    HOUR_MS,
+    PLAN_LABEL,
+    SETTINGS_CHANGED_EVENT,
+    WINDOW_DAYS,
+    activePlan,
+    browserZone,
+    chartWindow,
+    intelligentCycles,
+    projectMoisture,
+    scheduleOccurrences,
+    startOfZoneDay,
+    thresholdFor,
+    zoneIsoToMs,
+    type ChartZone,
+    type PlanContext,
+    type PlannedIrrigation,
+    type ProjectionPoint,
+    type ScheduleRow,
+    type WeatherHour,
+} from "@/lib/chartPlan";
+
+/*
+ * Graf vlage: tri poravnata panela (vlaga, temperatura, kiša) sa
+ * zajedničkom vremenskom osom.
+ *   - uvijek 3 dana (jučer, danas, sutra); strelice / povlačenje za historiju
+ *   - prag i planirana zalijevanja AKTIVNOG režima senzora
+ *   - prognoza vlage za 24 h s pojasom nesigurnosti
+ *   - sva vremena u vremenskoj zoni lokacije senzora
+ */
 
 type Reading = {
     created_at: string;
@@ -25,902 +45,778 @@ type Irrigation = {
     ended_at: string | null;
 };
 
-type WeatherPoint = {
-    time: number; // epoch ms
-    temperature: number;
-    precipitationProbability: number;
-};
-
-/*
- * Colors for each series - also used by the filter chips below
- * the chart, so changing one here keeps everything in sync.
- */
-const COLORS = {
-    moisture: "#2563eb",
-    irrigation: "#10b981",
-    temperature: "#f97316",
-    rain: "#38bdf8",
-};
-
-/*
- * Uski ekran (mobitel): rjeđe oznake na osama i bez naslova osa.
- */
-const NARROW_QUERY = "(max-width: 639px)";
-
-function subscribeNarrow(onChange: () => void) {
-    const query = window.matchMedia(NARROW_QUERY);
-    query.addEventListener("change", onChange);
-
-    return () => query.removeEventListener("change", onChange);
-}
-
-function useIsNarrow() {
-    return useSyncExternalStore(
-        subscribeNarrow,
-        () => window.matchMedia(NARROW_QUERY).matches,
-        () => false
-    );
-}
-
-const RANGE_PRESETS: { label: string; days: number }[] = [
-    { label: "1D", days: 1 },
-    { label: "2D", days: 2 },
-    { label: "3D", days: 3 },
-    { label: "7D", days: 7 },
-    { label: "15D", days: 15 },
-];
-
-/*
- * You can scroll the window forward by at most this many days
- * past today - weather forecast only reaches this far ahead.
- */
-const MAX_FORWARD_OFFSET = 1;
-
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-type ChartPeriod = {
-    id: string;
-    start: Date;
-    end: Date;
-    stillRunning: boolean;
-    x1: number;
-    x2: number;
-};
-
-type SeriesKey = "moisture" | "irrigation" | "temperature" | "rain";
-
-function formatClockTime(date: Date) {
-    return date.toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-    });
-}
-
-function formatShortDate(date: Date) {
-    return date.toLocaleDateString([], {
-        day: "2-digit",
-        month: "2-digit",
-    });
-}
-
-function formatDateTime(date: Date, multiDay: boolean) {
-    if (!multiDay) return formatClockTime(date);
-
-    return date.toLocaleString([], {
-        day: "2-digit",
-        month: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-    });
-}
-
-function formatDuration(start: Date, end: Date) {
-    const totalMinutes = Math.max(
-        0,
-        Math.round((end.getTime() - start.getTime()) / 60000)
-    );
-
-    const hours = Math.floor(totalMinutes / 60);
-    const minutes = totalMinutes % 60;
-
-    if (hours === 0) return `${minutes} min`;
-    if (minutes === 0) return `${hours} h`;
-
-    return `${hours} h ${minutes} min`;
-}
-
-/*
- * Fetches hourly temperature + rain probability from Open-Meteo
- * covering [rangeStart, rangeEnd). pastDays/forecastDays are
- * relative to "today", not to the window itself, since that's
- * how Open-Meteo's API works - so scrolling the window forward
- * or backward changes how far back/ahead we ask for.
- */
-async function fetchWeather(
-    latitude: number,
-    longitude: number,
-    rangeStart: Date,
-    rangeEnd: Date
-): Promise<WeatherPoint[] | undefined> {
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-
-    const pastDays = Math.max(
-        0,
-        Math.round((todayStart.getTime() - rangeStart.getTime()) / DAY_MS)
-    );
-
-    const forecastDays = Math.max(
-        1,
-        Math.round((rangeEnd.getTime() - todayStart.getTime()) / DAY_MS)
-    );
-
-    const url =
-        `https://api.open-meteo.com/v1/forecast` +
-        `?latitude=${latitude}&longitude=${longitude}` +
-        `&hourly=temperature_2m,precipitation_probability` +
-        `&past_days=${pastDays}&forecast_days=${forecastDays}` +
-        `&timezone=auto`;
-
-    try {
-        const response = await fetch(url);
-
-        if (!response.ok) {
-            console.error(
-                "Weather API error:",
-                response.status,
-                await response.text()
-            );
-            return undefined;
-        }
-
-        const json = await response.json();
-
-        const times: string[] = json.hourly?.time ?? [];
-        const temps: number[] = json.hourly?.temperature_2m ?? [];
-        const rain: number[] = json.hourly?.precipitation_probability ?? [];
-
-        return times.map((isoTime, index) => ({
-            time: new Date(isoTime).getTime(),
-            temperature: temps[index],
-            precipitationProbability: rain[index],
-        }));
-    } catch (error) {
-        console.error("Weather fetch error:", error);
-        return undefined;
-    }
-}
-
-/*
- * Custom tooltip content: reads each hovered point's OWN time
- * from its payload rather than trusting recharts' shared axis
- * label, which can disagree across mixed series types (and was
- * the cause of the wrong time tag on sensor readings).
- */
-type ChartTooltipEntry = {
-    dataKey?: string | number;
-    value?: number | string | readonly (number | string)[];
-    color?: string;
-    payload?: {
-        time?: number;
-    };
-};
-
-type ChartTooltipProps = {
-    active?: boolean;
-    payload?: readonly ChartTooltipEntry[];
-    multiDay: boolean;
-};
-
-function ChartTooltip({
-    active,
-    payload,
-    multiDay,
-}: ChartTooltipProps) {
-    if (!active || !payload || payload.length === 0) {
-        return null;
-    }
-
-    const time = payload[0]?.payload?.time;
-    const label =
-        typeof time === "number"
-            ? formatDateTime(new Date(time), multiDay)
-            : "";
-
-    return (
-        <div className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs shadow-lg">
-            <p className="font-semibold text-slate-700">
-                {label}
-            </p>
-
-            {payload.map((entry, index) => {
-                const value = entry.value;
-
-                if (
-                    typeof value !== "number" ||
-                    entry.dataKey === undefined
-                ) {
-                    return null;
-                }
-
-                let text = "";
-
-                if (entry.dataKey === "moisture") {
-                    text = `Moisture: ${value}%`;
-                } else if (entry.dataKey === "temperature") {
-                    text = `Temperature: ${value}\u00b0C`;
-                } else if (entry.dataKey === "rain") {
-                    text = `Rain probability: ${value}%`;
-                }
-
-                if (!text) {
-                    return null;
-                }
-
-                return (
-                    <p
-                        key={`${String(entry.dataKey)}-${index}`}
-                        className="mt-0.5"
-                        style={{ color: entry.color }}
-                    >
-                        {text}
-                    </p>
-                );
-            })}
-        </div>
-    );
-}
-
 type Props = {
     data: Reading[];
     irrigations?: Irrigation[];
     latitude?: number | null;
     longitude?: number | null;
+    sensorId?: string | null;
 };
+
+const COLORS = {
+    moisture: "#2a78d6",
+    moistureFill: "rgba(42, 120, 214, 0.12)",
+    irrigation: "#1baf7a",
+    irrigationFill: "rgba(27, 175, 122, 0.16)",
+    temperature: "#eb6834",
+    rain: "#6aa6e8",
+    threshold: "#c98500",
+    grid: "#eef0f3",
+    border: "#e3e5e9",
+    future: "rgba(241, 243, 246, 0.6)",
+    text: "#8a8984",
+    textStrong: "#52514e",
+};
+
+const PLAN_ICON = { schedule: "📅", intelligent: "🤖", moisture: "≈" } as const;
+const PLAN_SOURCE = {
+    schedule: "Schedule",
+    intelligent: "FAO-56 plan",
+    moisture: "Estimate · moisture threshold",
+} as const;
+
+const HISTORY_DAYS = 30; // koliko baza čuva očitanja (cleanup.sql)
+const MAX_BACK = HISTORY_DAYS - 2;
+const ML = 40;
+const MR = 12;
+
+/* ---------------------------------------------------------
+ * Podaci: vrijeme (preko /api/weather) i postavke režima
+ * --------------------------------------------------------- */
+
+function useWeather(latitude?: number | null, longitude?: number | null) {
+    const [weather, setWeather] = useState<WeatherHour[]>([]);
+    const [zone, setZone] = useState<ChartZone>(browserZone);
+
+    useEffect(() => {
+        if (typeof latitude !== "number" || typeof longitude !== "number") {
+            return;
+        }
+
+        let cancelled = false;
+
+        async function load() {
+            const url =
+                `/api/weather?latitude=${latitude}&longitude=${longitude}` +
+                `&hourly=temperature_2m,precipitation_probability,precipitation,et0_fao_evapotranspiration` +
+                `&past_days=${HISTORY_DAYS + 1}&forecast_days=3&timezone=auto`;
+
+            try {
+                const response = await fetch(url);
+
+                if (!response.ok) {
+                    console.error("Weather API error:", response.status);
+                    return;
+                }
+
+                const json = await response.json();
+                const offset = Number(json.utc_offset_seconds ?? 0);
+                const h = json.hourly ?? {};
+                const times: string[] = h.time ?? [];
+
+                if (cancelled) return;
+
+                setZone({
+                    timeZone: typeof json.timezone === "string" ? json.timezone : undefined,
+                    offsetSeconds: offset,
+                });
+
+                setWeather(
+                    times.map((t, i) => ({
+                        time: zoneIsoToMs(t, offset),
+                        temperature: h.temperature_2m?.[i] ?? 0,
+                        rainProbability: h.precipitation_probability?.[i] ?? 0,
+                        precipitation: h.precipitation?.[i] ?? 0,
+                        et0: h.et0_fao_evapotranspiration?.[i] ?? 0,
+                    }))
+                );
+            } catch (error) {
+                console.error("Weather fetch error:", error);
+            }
+        }
+
+        load();
+        const interval = setInterval(load, 30 * 60_000);
+
+        return () => {
+            cancelled = true;
+            clearInterval(interval);
+        };
+    }, [latitude, longitude]);
+
+    return { weather, zone };
+}
+
+function usePlanContext(sensorId?: string | null) {
+    // Postavke su vezane za senzor - stari senzor se nikad ne prikazuje.
+    const [state, setState] = useState<{ sensorId: string; ctx: PlanContext } | null>(null);
+
+    useEffect(() => {
+        if (!sensorId) return;
+
+        let cancelled = false;
+
+        async function load() {
+            const { data: settings, error } = await supabase
+                .from("irrigation_settings")
+                .select("id, mode, active_strategy")
+                .eq("sensor_id", sensorId)
+                .maybeSingle();
+
+            if (error || !settings) {
+                if (error) console.error("Chart settings error:", error);
+                return;
+            }
+
+            const [moisture, schedules, fao] = await Promise.all([
+                supabase
+                    .from("irrigation_moisture_settings")
+                    .select("threshold, duration_minutes")
+                    .eq("irrigation_setting_id", settings.id)
+                    .maybeSingle(),
+                supabase
+                    .from("irrigation_schedules")
+                    .select("id, start_time, duration_minutes, monday, tuesday, wednesday, thursday, friday, saturday, sunday, enabled")
+                    .eq("irrigation_setting_id", settings.id),
+                supabase
+                    .from("fao56_settings")
+                    .select("kc, root_depth_mm, taw_per_m, p, field_capacity, wilting_point, mm_per_minute, plan")
+                    .eq("sensor_id", sensorId)
+                    .maybeSingle(),
+            ]);
+
+            if (cancelled) return;
+
+            setState({
+                sensorId: sensorId as string, ctx: {
+                    mode: settings.mode,
+                    activeStrategy: settings.active_strategy,
+                    moistureThreshold:
+                        moisture.data?.threshold != null ? Number(moisture.data.threshold) : null,
+                    moistureDuration:
+                        moisture.data?.duration_minutes != null ? Number(moisture.data.duration_minutes) : null,
+                    schedules: (schedules.data ?? []) as ScheduleRow[],
+                    fao: (fao.data as PlanContext["fao"]) ?? null,
+                }
+            });
+        }
+
+        load();
+
+        const interval = setInterval(() => {
+            if (!document.hidden) load();
+        }, 60_000);
+
+        const onChange = () => load();
+        window.addEventListener(SETTINGS_CHANGED_EVENT, onChange);
+
+        return () => {
+            cancelled = true;
+            clearInterval(interval);
+            window.removeEventListener(SETTINGS_CHANGED_EVENT, onChange);
+        };
+    }, [sensorId]);
+
+    return state && state.sensorId === sensorId ? state.ctx : null;
+}
+
+/* ---------------------------------------------------------
+ * Pomoćne funkcije za prikaz
+ * --------------------------------------------------------- */
+
+function fmt(ms: number, zone: ChartZone, opts: Intl.DateTimeFormatOptions) {
+    return new Date(ms).toLocaleString([], { ...opts, timeZone: zone.timeZone });
+}
+
+const fmtTime = (ms: number, z: ChartZone) =>
+    fmt(ms, z, { hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+// Datum uvijek kao "14.11." (nezavisno od jezika browsera).
+function fmtDay(ms: number, z: ChartZone) {
+    const parts = new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "2-digit", timeZone: z.timeZone })
+        .formatToParts(new Date(ms));
+    const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+    return `${get("day")}.${get("month")}.`;
+}
+const fmtDateTime = (ms: number, z: ChartZone) => `${fmtDay(ms, z)} ${fmtTime(ms, z)}`;
+
+function smoothPath(pts: [number, number][]) {
+    if (pts.length === 0) return "";
+    let d = `M${pts[0][0]},${pts[0][1]}`;
+    for (let i = 1; i < pts.length; i++) {
+        const [x0, y0] = pts[i - 1];
+        const [x1, y1] = pts[i];
+        const cx = (x0 + x1) / 2;
+        d += ` C${cx},${y0} ${cx},${y1} ${x1},${y1}`;
+    }
+    return d;
+}
+
+/** Pozicije kratkih oznaka planiranih zalijevanja, bez preklapanja. */
+function plannedLabelPositions(
+    items: PlannedIrrigation[],
+    x: (t: number) => number,
+    width: number,
+    minX: number
+) {
+    const result: { item: PlannedIrrigation; lx: number }[] = [];
+    let labelEnd = -Infinity;
+    const tw = 36;
+
+    for (const item of items) {
+        const bx = x(item.start);
+        const bw = Math.max(10, x(item.end) - bx);
+        const lx = bx + bw + 3 + tw > width ? bx - 3 - tw : bx + bw + 3;
+        if (lx <= labelEnd + 4 || lx < minX) continue;
+        labelEnd = lx + tw;
+        result.push({ item, lx });
+    }
+
+    return result;
+}
+
+function nearestBy<T>(items: T[], time: (item: T) => number, t: number, maxDiff: number) {
+    let best: T | null = null;
+    let bestDiff = Infinity;
+
+    for (const item of items) {
+        const diff = Math.abs(time(item) - t);
+        if (diff < bestDiff) {
+            best = item;
+            bestDiff = diff;
+        }
+    }
+
+    return bestDiff <= maxDiff ? best : null;
+}
+
+/* ---------------------------------------------------------
+ * Komponenta
+ * --------------------------------------------------------- */
 
 export default function MoistureChart({
     data,
     irrigations = [],
     latitude,
     longitude,
+    sensorId,
 }: Props) {
-    const [rangeDays, setRangeDays] = useState(1);
+    const { weather, zone } = useWeather(latitude, longitude);
+    const ctx = usePlanContext(sensorId);
 
-    const narrow = useIsNarrow();
-
-    /*
-     * 0 = window ends today, -1 = shifted back a day,
-     * +1 = shifted forward a day (tomorrow), etc.
-     */
-    const [dayOffset, setDayOffset] = useState(0);
+    const [now, setNow] = useState(() => Date.now());
+    const [offsetDays, setOffsetDays] = useState(0);
+    const [hoverT, setHoverT] = useState<number | null>(null);
+    const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
+    const [width, setWidth] = useState(900);
 
     const containerRef = useRef<HTMLDivElement>(null);
-
-    const hasLocation =
-        typeof latitude === "number" && typeof longitude === "number";
-
-    const [weatherPoints, setWeatherPoints] = useState<WeatherPoint[]>([]);
-    const [weatherLoading, setWeatherLoading] = useState(false);
-
-    /*
-     * Which series are turned on. Weather series only matter
-     * when a location is available; they're ignored otherwise.
-     */
-    const [visible, setVisible] = useState<Record<SeriesKey, boolean>>({
-        moisture: true,
-        irrigation: true,
-        temperature: true,
-        rain: true,
-    });
-
-    /*
-     * The currently shown irrigation tooltip. "pinned" is set by
-     * a click/tap (works on touch devices, which have no hover)
-     * and stays until the same area is tapped again. A plain
-     * hover overrides it temporarily while the mouse is over an
-     * area, then falls back to whatever is pinned.
-     */
-    const [tooltip, setTooltip] = useState<{
-        id: string;
-        x: number;
-        y: number;
-        pinned: boolean;
-    } | null>(null);
-
-    /*
-     * Window end is "end of today" shifted by dayOffset days;
-     * window start is rangeDays earlier. So dayOffset=0, 1D ->
-     * just today. dayOffset=-1, 1D -> just yesterday. dayOffset
-     * =1, 1D -> just tomorrow (weather forecast only).
-     */
-    const rangeEnd = new Date();
-    rangeEnd.setHours(24, 0, 0, 0);
-    rangeEnd.setDate(rangeEnd.getDate() + dayOffset);
-
-    const rangeStart = new Date(rangeEnd);
-    rangeStart.setDate(rangeStart.getDate() - rangeDays);
-
-    const rangeStartMs = rangeStart.getTime();
-    const rangeEndMs = rangeEnd.getTime();
-
-    const multiDay = rangeDays > 1;
-
-    /*
-     * ---------------------------------------------------------
-     * FETCH WEATHER for the current window
-     * ---------------------------------------------------------
-     */
+    const dragStart = useRef<number | null>(null);
 
     useEffect(() => {
-        if (!hasLocation) {
-            setWeatherPoints([]);
+        const interval = setInterval(() => setNow(Date.now()), 60_000);
+        return () => clearInterval(interval);
+    }, []);
+
+    useEffect(() => {
+        const node = containerRef.current;
+        if (!node) return;
+
+        const observer = new ResizeObserver(([entry]) => {
+            setWidth(Math.max(280, Math.round(entry.contentRect.width)));
+        });
+
+        observer.observe(node);
+        return () => observer.disconnect();
+    }, []);
+
+    const { t0, t1 } = chartWindow(now, zone, offsetDays);
+    const nowVisible = now > t0 && now < t1;
+    const narrow = width < 600;
+
+    /* ---------- podaci ---------- */
+
+    const readings = useMemo(
+        () =>
+            data
+                .map((r) => ({ time: new Date(r.created_at).getTime(), moisture: Number(r.moisture) }))
+                .filter((r) => Number.isFinite(r.time) && Number.isFinite(r.moisture))
+                .sort((a, b) => a.time - b.time),
+        [data]
+    );
+
+    const pastIrrigations = useMemo(
+        () =>
+            irrigations
+                .map((i) => ({
+                    id: i.id,
+                    start: new Date(i.started_at).getTime(),
+                    end: i.ended_at ? new Date(i.ended_at).getTime() : now,
+                }))
+                .filter((i) => i.end > t0 && i.start < t1),
+        [irrigations, now, t0, t1]
+    );
+
+    const plan = activePlan(ctx);
+    const threshold = thresholdFor(ctx);
+
+    const { projection, planned } = useMemo(() => {
+        const horizon = now + 2 * DAY_MS;
+        let base: PlannedIrrigation[] = [];
+
+        if (plan === "schedule") base = scheduleOccurrences(ctx?.schedules ?? [], now, horizon, zone);
+        if (plan === "intelligent") base = intelligentCycles(ctx, now);
+
+        const last = readings.at(-1);
+        const fresh = last && now - last.time < 3 * HOUR_MS;
+
+        if (!fresh || weather.length === 0) {
+            return { projection: [] as ProjectionPoint[], planned: base };
+        }
+
+        const result = projectMoisture(last.moisture, now, weather, ctx, base);
+        return {
+            projection: result.points,
+            planned: [...result.planned, ...base.filter((b) => b.start > now + 24 * HOUR_MS)]
+                .filter((p, i, all) => all.findIndex((q) => q.start === p.start) === i)
+                .sort((a, b) => a.start - b.start),
+        };
+    }, [plan, ctx, readings, weather, now, zone]);
+
+    /* ---------- skale ---------- */
+
+    const plotW = width - ML - MR;
+    const x = (t: number) => ML + ((t - t0) / (t1 - t0)) * plotW;
+    const tFromX = (px: number) => t0 + ((px - ML) / plotW) * (t1 - t0);
+
+    const M = { h: 240, top: 22, bottom: 8 };
+    const T = { h: 100, top: 8, bottom: 8 };
+    const R = { h: 116, top: 8, bottom: 24 };
+
+    const yM = (v: number) => M.top + (1 - v / 100) * (M.h - M.top - M.bottom);
+    const yR = (v: number) => R.top + (1 - v / 100) * (R.h - R.top - R.bottom);
+
+    const windowWeather = weather.filter((w) => w.time >= t0 - HOUR_MS && w.time <= t1);
+    const temps = windowWeather.map((w) => w.temperature);
+    const tMin = temps.length ? Math.floor(Math.min(...temps) / 5) * 5 : 0;
+    const tMax = temps.length ? Math.max(tMin + 10, Math.ceil(Math.max(...temps) / 5) * 5) : 20;
+    const yT = (v: number) => T.top + (1 - (v - tMin) / (tMax - tMin)) * (T.h - T.top - T.bottom);
+    const tStep = tMax - tMin <= 20 ? 5 : 10;
+    const tTicks: number[] = [];
+    for (let v = tMin; v <= tMax; v += tStep) tTicks.push(v);
+
+    // Oznake na osi: dani (i svakih 6 h na širokom ekranu).
+    const ticks: { t: number; day: boolean }[] = [];
+    for (let t = startOfZoneDay(t0, zone); t <= t1; t += 6 * HOUR_MS) {
+        if (t < t0) continue;
+        const day = Math.abs(startOfZoneDay(t, zone) - t) < 60_000;
+        if (day || !narrow) ticks.push({ t, day });
+    }
+
+    /* ---------- elementi koji se ponavljaju u panelima ---------- */
+
+    const gridX = (h: number, top: number, bottom: number) =>
+        ticks.filter((k) => k.day).map((k) => (
+            <line key={k.t} x1={x(k.t)} x2={x(k.t)} y1={top} y2={h - bottom} stroke={COLORS.border} strokeDasharray="3 3" />
+        ));
+
+    const futureShade = (h: number, top: number, bottom: number) =>
+        nowVisible && (
+            <>
+                <rect x={x(now)} y={top} width={x(t1) - x(now)} height={h - top - bottom} fill={COLORS.future} />
+                <line x1={x(now)} x2={x(now)} y1={top} y2={h - bottom} stroke={COLORS.textStrong} strokeWidth={1.5} />
+            </>
+        );
+
+    const hoverLine = (h: number, top: number, bottom: number) =>
+        hoverT !== null && (
+            <line x1={x(hoverT)} x2={x(hoverT)} y1={top} y2={h - bottom} stroke={COLORS.text} strokeDasharray="2 3" />
+        );
+
+    /* ---------- vlaga ---------- */
+
+    const windowReadings = readings.filter((r) => r.time >= t0 && r.time <= t1);
+    const moistPts = windowReadings.map((r) => [x(r.time), yM(r.moisture)] as [number, number]);
+    const projPts = nowVisible ? projection.filter((p) => p.time <= t1) : [];
+    const bandPath = projPts.length > 1
+        ? `M${projPts.map((p) => `${x(p.time)},${yM(p.high)}`).join(" L")} L${[...projPts].reverse().map((p) => `${x(p.time)},${yM(p.low)}`).join(" L")} Z`
+        : "";
+
+    const plannedInWindow = planned.filter((p) => p.end > t0 && p.start < t1);
+
+    // Kratke oznake planiranih zalijevanja, bez preklapanja.
+    const plannedLabels = plannedLabelPositions(plannedInWindow, x, width, ML).map(({ item, lx }) => (
+        <text key={`l-${item.start}`} x={lx} y={M.top + 13} fontSize={11} fontWeight={600} fill={COLORS.irrigation}>
+            {`${PLAN_ICON[item.source]}${item.minutes}′`}
+        </text>
+    ));
+
+    /* ---------- interakcija ---------- */
+
+    function onPointerMove(e: React.PointerEvent<SVGSVGElement>) {
+        const rect = e.currentTarget.getBoundingClientRect();
+        const px = ((e.clientX - rect.left) / rect.width) * width;
+        const t = tFromX(px);
+
+        if (t < t0 || t > t1) {
+            setHoverT(null);
             return;
         }
 
-        let cancelled = false;
-        setWeatherLoading(true);
+        const box = containerRef.current?.getBoundingClientRect();
+        if (box) {
+            let left = e.clientX - box.left + 14;
+            if (left + 200 > box.width) left = e.clientX - box.left - 210;
+            setTooltipPos({ x: Math.max(4, left), y: e.clientY - box.top + 12 });
+        }
 
-        fetchWeather(
-            latitude as number,
-            longitude as number,
-            rangeStart,
-            rangeEnd
-        ).then((points) => {
-            if (cancelled) return;
-            if (points) setWeatherPoints(points);
-            setWeatherLoading(false);
-        });
-
-        return () => {
-            cancelled = true;
-        };
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [hasLocation, latitude, longitude, rangeDays, dayOffset]);
-
-    const now = new Date();
-
-    function clamp(ms: number) {
-        return Math.min(Math.max(ms, rangeStartMs), rangeEndMs);
+        setHoverT(t);
     }
 
-    const moistureData = data
-        .filter((reading) => {
-            const t = new Date(reading.created_at).getTime();
-            return t >= rangeStartMs && t <= rangeEndMs;
-        })
-        .map((reading) => {
-            const date = new Date(reading.created_at);
+    function shift(delta: number) {
+        setOffsetDays((d) => Math.min(MAX_BACK, Math.max(0, d + delta)));
+        setHoverT(null);
+    }
 
-            return {
-                time: date.getTime(),
-                moisture: Number(reading.moisture),
-            };
-        });
+    function onPointerDown(e: React.PointerEvent) {
+        dragStart.current = e.clientX;
+    }
 
-    const weatherData = weatherPoints
-        .filter(
-            (point) => point.time >= rangeStartMs && point.time <= rangeEndMs
-        )
-        .map((point) => ({
-            time: point.time,
-            temperature: point.temperature,
-            rain: point.precipitationProbability,
-        }));
+    function onPointerUp(e: React.PointerEvent) {
+        if (dragStart.current === null) return;
+        const dx = e.clientX - dragStart.current;
+        dragStart.current = null;
 
-    const periods: ChartPeriod[] = irrigations
-        .map((irrigation) => {
-            const start = new Date(irrigation.started_at);
+        const dayPx = width / WINDOW_DAYS;
+        const days = Math.round(dx / dayPx) || (Math.abs(dx) > 40 ? Math.sign(dx) : 0);
+        if (days) shift(days); // udesno = unazad u prošlost
+    }
 
-            const end = irrigation.ended_at
-                ? new Date(irrigation.ended_at)
-                : now;
+    const svgProps = {
+        width: "100%",
+        onPointerMove,
+        onPointerLeave: () => setHoverT(null),
+        onPointerDown,
+        onPointerUp,
+        onPointerCancel: () => { dragStart.current = null; },
+        style: { touchAction: "pan-y", cursor: "grab", userSelect: "none" } as React.CSSProperties,
+    };
 
-            return {
-                id: irrigation.id,
-                start,
-                end,
-                stillRunning: irrigation.ended_at === null,
-                x1: clamp(start.getTime()),
-                x2: clamp(end.getTime()),
-            };
-        })
-        .filter(
-            (period) =>
-                period.x1 < period.x2 &&
-                period.end.getTime() > rangeStartMs &&
-                period.start.getTime() < rangeEndMs
+    /* ---------- tooltip ---------- */
+
+    let tooltip: React.ReactNode = null;
+
+    if (hoverT !== null) {
+        const future = nowVisible && hoverT > now;
+        const measured = future ? null : nearestBy(readings, (r) => r.time, hoverT, 45 * 60_000);
+        const projected = future ? nearestBy(projection, (p) => p.time, hoverT, 30 * 60_000) : null;
+        const w = nearestBy(weather, (h) => h.time, hoverT, 45 * 60_000);
+        const pastIrr = pastIrrigations.find((i) => hoverT >= i.start - 10 * 60_000 && hoverT <= i.end + 10 * 60_000);
+        const plannedIrr = plannedInWindow.find((p) => hoverT >= p.start - 10 * 60_000 && hoverT <= p.end + 10 * 60_000);
+
+        const row = (color: string, label: string, value: string) => (
+            <div className="flex items-center gap-2 text-slate-600">
+                <span className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: color }} />
+                {label}
+                <b className="ml-auto pl-3 font-semibold text-slate-900">{value}</b>
+            </div>
         );
 
-    /*
-     * Tick positions: every 2 hours for a single day, or one
-     * tick per day boundary for a multi-day range.
-     */
-    const ticks: number[] = [];
-
-    if (!multiDay) {
-        const hourStep = narrow ? 6 : 2;
-
-        for (let h = 0; h <= 24; h += hourStep) {
-            ticks.push(rangeStartMs + h * 60 * 60 * 1000);
-        }
-    } else {
-        const dayStep = narrow ? Math.ceil(rangeDays / 4) : 1;
-        const cursor = new Date(rangeStart);
-
-        while (cursor.getTime() <= rangeEndMs) {
-            ticks.push(cursor.getTime());
-            cursor.setDate(cursor.getDate() + dayStep);
-        }
+        tooltip = (
+            <div
+                className="pointer-events-none absolute z-10 min-w-[180px] rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs shadow-lg"
+                style={{ left: tooltipPos.x, top: tooltipPos.y }}
+            >
+                <p className="mb-1 font-semibold text-slate-800">
+                    {fmtDateTime(hoverT, zone)}{future ? " · forecast" : ""}
+                </p>
+                {measured && row(COLORS.moisture, "Moisture", `${measured.moisture.toFixed(1)}%`)}
+                {projected && row(COLORS.moisture, "Moisture (forecast)", `${Math.round(projected.moisture)}% ±${Math.round(projected.high - projected.moisture)}`)}
+                {w && row(COLORS.temperature, "Temperature", `${w.temperature.toFixed(1)}°C`)}
+                {w && row(COLORS.rain, "Rain probability", `${w.rainProbability}%`)}
+                {pastIrr && row(COLORS.irrigation, "Irrigation", `${Math.round((pastIrr.end - pastIrr.start) / 60_000)} min`)}
+                {plannedIrr && row(COLORS.irrigation, plannedIrr.estimated ? "Expected irrigation" : "Planned irrigation", `${plannedIrr.minutes} min`)}
+            </div>
+        );
     }
 
-    function tickFormatter(value: number) {
-        const date = new Date(value);
+    /* ---------- lista narednih zalijevanja ---------- */
 
-        if (!multiDay) {
-            return date.toLocaleTimeString([], {
-                hour: "2-digit",
-                minute: "2-digit",
-                ...(narrow ? { hour12: false } : {}),
-            });
-        }
+    const upcoming = planned.filter((p) => p.start >= now - 5 * 60_000).slice(0, 5);
 
-        return formatShortDate(date);
-    }
+    const emptyUpcoming: Record<typeof plan, string> = {
+        moisture: threshold !== null
+            ? `Irrigation starts automatically when moisture drops below ${threshold}%. No drop below the threshold is expected in the next 24 h.`
+            : "Irrigation starts automatically when moisture drops below the threshold.",
+        schedule: "No scheduled irrigation in the next 48 h.",
+        intelligent: "The model decided that no irrigation is needed in the current 6-hour period. It runs again at 00, 06, 12 and 18h.",
+        none: "",
+    };
 
-    function positionFromEvent(e: { clientX: number; clientY: number }) {
-        const rect = containerRef.current?.getBoundingClientRect();
+    const rangeLabel = offsetDays === 0
+        ? "Yesterday · Today · Tomorrow"
+        : `${fmtDay(t0, zone)} – ${fmtDay(t1 - HOUR_MS, zone)}`;
 
-        if (!rect) return { x: 0, y: 0 };
-
-        return {
-            x: e.clientX - rect.left,
-            y: e.clientY - rect.top,
-        };
-    }
-
-    function handleMouseEnter(
-        period: ChartPeriod,
-        e: { clientX: number; clientY: number }
-    ) {
-        const { x, y } = positionFromEvent(e);
-        setTooltip({ id: period.id, x, y, pinned: false });
-    }
-
-    function handleMouseLeave() {
-        setTooltip((current) => (current && current.pinned ? current : null));
-    }
-
-    function handleClick(
-        period: ChartPeriod,
-        e: { clientX: number; clientY: number }
-    ) {
-        setTooltip((current) => {
-            if (current && current.id === period.id && current.pinned) {
-                return null;
-            }
-
-            const { x, y } = positionFromEvent(e);
-            return { id: period.id, x, y, pinned: true };
-        });
-    }
-
-    const activePeriod = tooltip
-        ? periods.find((period) => period.id === tooltip.id) ?? null
-        : null;
-
-    function toggleSeries(key: SeriesKey) {
-        setVisible((prev) => ({ ...prev, [key]: !prev[key] }));
-    }
-
-    function goToPreset(days: number) {
-        setRangeDays(days);
-        setDayOffset(0);
-        setTooltip(null);
-    }
-
-    function shiftWindow(delta: number) {
-        setDayOffset((prev) => Math.min(MAX_FORWARD_OFFSET, prev + delta));
-        setTooltip(null);
-    }
-
-    /*
-     * Label shown between the scroll arrows.
-     */
-    let windowLabel: string;
-
-    if (!multiDay) {
-        if (dayOffset === 0) windowLabel = "Today";
-        else if (dayOffset === -1) windowLabel = "Yesterday";
-        else if (dayOffset === 1) windowLabel = "Tomorrow";
-        else windowLabel = formatShortDate(rangeStart);
-    } else {
-        const lastDay = new Date(rangeEnd.getTime() - DAY_MS);
-        windowLabel = `${formatShortDate(rangeStart)} - ${formatShortDate(lastDay)}`;
-    }
-
-    const filterChips: {
-        key: SeriesKey;
-        label: string;
-        color: string;
-        available: boolean;
-    }[] = [
-            {
-                key: "moisture",
-                label: "Moisture",
-                color: COLORS.moisture,
-                available: true,
-            },
-            {
-                key: "irrigation",
-                label: `Irrigation (${periods.length})`,
-                color: COLORS.irrigation,
-                available: periods.length > 0,
-            },
-            {
-                key: "temperature",
-                label: "Temperature",
-                color: COLORS.temperature,
-                available: hasLocation,
-            },
-            {
-                key: "rain",
-                label: "Rain probability",
-                color: COLORS.rain,
-                available: hasLocation,
-            },
-        ];
+    /* ---------- render ---------- */
 
     return (
-        <div>
+        <div ref={containerRef} className="relative">
 
-            {/* RANGE SELECTOR + DAY SCROLL */}
-
+            {/* NAVIGACIJA + REŽIM */}
             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
 
-                <div className="flex flex-wrap gap-2">
-                    {RANGE_PRESETS.map((preset) => (
-                        <button
-                            key={preset.label}
-                            onClick={() => goToPreset(preset.days)}
-                            className={`rounded-lg border px-2.5 py-1.5 text-xs font-medium transition sm:px-3 ${rangeDays === preset.days && dayOffset === 0
-                                ? "border-blue-500 bg-blue-50 text-blue-600"
-                                : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-                                }`}
-                        >
-                            {preset.label}
-                        </button>
-                    ))}
-                </div>
-
-                <div className="flex items-center gap-2">
-
+                <div className="flex items-center gap-1.5">
                     <button
-                        onClick={() => shiftWindow(-1)}
-                        aria-label="Previous"
-                        className="flex h-7 w-7 items-center justify-center rounded-lg border border-slate-200 bg-white text-sm text-slate-600 hover:bg-slate-50"
+                        type="button"
+                        onClick={() => shift(1)}
+                        disabled={offsetDays >= MAX_BACK}
+                        aria-label="One day back"
+                        className="h-8 w-8 rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-35"
                     >
-                        &lt;
+                        ‹
                     </button>
 
-                    <span className="min-w-[90px] text-center text-xs font-medium text-slate-600">
-                        {windowLabel}
+                    <span className="min-w-[150px] text-center text-xs font-semibold text-slate-600">
+                        {rangeLabel}
                     </span>
 
                     <button
-                        onClick={() => shiftWindow(1)}
-                        disabled={dayOffset >= MAX_FORWARD_OFFSET}
-                        aria-label="Next"
-                        className="flex h-7 w-7 items-center justify-center rounded-lg border border-slate-200 bg-white text-sm text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                        type="button"
+                        onClick={() => shift(-1)}
+                        disabled={offsetDays === 0}
+                        aria-label="One day forward"
+                        className="h-8 w-8 rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-35"
                     >
-                        &gt;
+                        ›
                     </button>
 
-                    {hasLocation && weatherLoading && (
-                        <span className="text-xs text-slate-400">
-                            Loading weather...
-                        </span>
+                    {offsetDays > 0 && (
+                        <button
+                            type="button"
+                            onClick={() => shift(-offsetDays)}
+                            className="h-8 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                        >
+                            Today
+                        </button>
                     )}
-
                 </div>
 
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
+                    <span className="inline-flex items-center gap-1.5"><i className="inline-block h-[3px] w-3.5 rounded" style={{ background: COLORS.moisture }} />Moisture</span>
+                    <span className="inline-flex items-center gap-1.5"><i className="inline-block w-3.5 border-t-2 border-dashed" style={{ borderColor: COLORS.moisture }} />Forecast</span>
+                    <span className="inline-flex items-center gap-1.5"><i className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: COLORS.irrigation }} />Irrigation</span>
+                    {plan !== "none" && (
+                        <span className="inline-flex items-center gap-1.5"><i className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: `repeating-linear-gradient(135deg, ${COLORS.irrigation} 0 2px, transparent 2px 5px)`, outline: `1px dashed ${COLORS.irrigation}` }} />Planned</span>
+                    )}
+                    {threshold !== null && (
+                        <span className="inline-flex items-center gap-1.5"><i className="inline-block h-[3px] w-3.5 rounded" style={{ background: COLORS.threshold }} />Threshold</span>
+                    )}
+                </div>
             </div>
 
-            <div
-                ref={containerRef}
-                style={{
-                    width: "100%",
-                    height: narrow ? "290px" : "340px",
-                    position: "relative",
-                }}
-            >
+            {/* VLAGA */}
+            <div className="flex justify-between text-xs text-slate-500">
+                <span>Soil moisture (%)</span>
+                <span className="font-medium text-slate-600">{PLAN_LABEL[plan]}</span>
+            </div>
 
-                <ResponsiveContainer width="100%" height="100%">
-                    <ComposedChart>
-                        <CartesianGrid stroke="#e5e7eb" strokeDasharray="3 3" />
+            <svg {...svgProps} viewBox={`0 0 ${width} ${M.h}`}>
+                <defs>
+                    <pattern id="planned-hatch" width={6} height={6} patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                        <rect width={6} height={6} fill={COLORS.irrigationFill} />
+                        <line x1={0} y1={0} x2={0} y2={6} stroke={COLORS.irrigation} strokeWidth={2} strokeOpacity={0.55} />
+                    </pattern>
+                </defs>
 
-                        <XAxis
-                            dataKey="time"
-                            type="number"
-                            domain={[rangeStartMs, rangeEndMs]}
-                            ticks={ticks}
-                            tickFormatter={tickFormatter}
-                            tick={{ fill: "#374151", fontSize: narrow ? 11 : 12 }}
-                        />
+                {[0, 25, 50, 75, 100].map((v) => (
+                    <g key={v}>
+                        <line x1={ML} x2={width - MR} y1={yM(v)} y2={yM(v)} stroke={COLORS.grid} />
+                        <text x={ML - 8} y={yM(v) + 4} textAnchor="end" fontSize={11} fill={COLORS.text}>{v}%</text>
+                    </g>
+                ))}
+                {gridX(M.h, M.top, M.bottom)}
+                {futureShade(M.h, M.top, M.bottom)}
 
-                        {/* LEFT AXIS: percentages (moisture + rain chance) */}
-                        <YAxis
-                            yAxisId="percent"
-                            domain={[0, 100]}
-                            width={narrow ? "auto" : 60}
-                            tick={{ fill: "#374151", fontSize: narrow ? 11 : 12 }}
-                            unit={narrow ? "%" : undefined}
-                            label={
-                                narrow
-                                    ? undefined
-                                    : {
-                                        value: "%",
-                                        angle: -90,
-                                        position: "insideLeft",
-                                        fill: "#374151",
-                                    }
-                            }
-                        />
-
-                        {/* RIGHT AXIS: temperature */}
-                        {hasLocation && (
-                            <YAxis
-                                yAxisId="temperature"
-                                orientation="right"
-                                domain={["auto", "auto"]}
-                                width={narrow ? "auto" : 60}
-                                tick={{
-                                    fill: COLORS.temperature,
-                                    fontSize: narrow ? 11 : 12,
-                                }}
-                                unit={narrow ? "°" : undefined}
-                                label={
-                                    narrow
-                                        ? undefined
-                                        : {
-                                            value: "\u00b0C",
-                                            angle: 90,
-                                            position: "insideRight",
-                                            fill: COLORS.temperature,
-                                        }
-                                }
-                            />
+                {nowVisible && (
+                    <>
+                        <text x={x(now) + 6} y={14} fontSize={11} fontWeight={600} fill={COLORS.textStrong}>now</text>
+                        {width - MR - x(now) > 110 && (
+                            <text x={width - MR} y={14} textAnchor="end" fontSize={11} fill={COLORS.text}>forecast →</text>
                         )}
+                    </>
+                )}
 
-                        <Tooltip
-                            cursor={{ strokeDasharray: "3 3" }}
-                            content={(props: { active?: boolean; payload?: unknown }) => (
-                                <ChartTooltip
-                                    active={props.active}
-                                    payload={
-                                        props.payload as unknown as
-                                        | readonly ChartTooltipEntry[]
-                                        | undefined
-                                    }
-                                    multiDay={multiDay}
-                                />
-                            )}
+                {pastIrrigations.map((i) => {
+                    const bx = x(Math.max(i.start, t0));
+                    const bw = Math.max(4, x(Math.min(i.end, t1)) - bx);
+                    return (
+                        <g key={i.id}>
+                            <rect x={bx} y={M.top} width={bw} height={M.h - M.top - M.bottom} fill={COLORS.irrigationFill} rx={2} />
+                            <rect x={bx} y={M.top} width={bw} height={4} fill={COLORS.irrigation} rx={2} />
+                        </g>
+                    );
+                })}
+
+                {plannedInWindow.map((p) => {
+                    const bx = x(p.start);
+                    const bw = Math.max(10, x(p.end) - bx);
+                    return (
+                        <rect
+                            key={`p-${p.start}`}
+                            x={bx}
+                            y={M.top}
+                            width={bw}
+                            height={M.h - M.top - M.bottom}
+                            fill="url(#planned-hatch)"
+                            stroke={COLORS.irrigation}
+                            strokeDasharray="3 2"
+                            strokeOpacity={p.estimated ? 0.5 : 1}
+                            rx={3}
                         />
+                    );
+                })}
+                {plannedLabels}
 
-                        {/* IRRIGATION AREAS - hover (or tap) for details */}
+                {moistPts.length > 1 && (
+                    <>
+                        <path d={`${smoothPath(moistPts)} L${moistPts.at(-1)![0]},${yM(0)} L${moistPts[0][0]},${yM(0)} Z`} fill={COLORS.moistureFill} />
+                        <path d={smoothPath(moistPts)} fill="none" stroke={COLORS.moisture} strokeWidth={2} strokeLinejoin="round" />
+                    </>
+                )}
 
-                        {visible.irrigation &&
-                            periods.map((period) => (
-                                <ReferenceArea
-                                    key={`${period.id}-area`}
-                                    yAxisId="percent"
-                                    x1={period.x1}
-                                    x2={period.x2}
-                                    fill={COLORS.irrigation}
-                                    fillOpacity={
-                                        tooltip?.id === period.id ? 0.28 : 0.12
-                                    }
-                                    stroke="none"
-                                    style={{ cursor: "pointer" }}
-                                    onMouseEnter={(e: React.MouseEvent) =>
-                                        handleMouseEnter(period, e)
-                                    }
-                                    onMouseMove={(e: React.MouseEvent) =>
-                                        handleMouseEnter(period, e)
-                                    }
-                                    onMouseLeave={handleMouseLeave}
-                                    onClick={(e: React.MouseEvent) =>
-                                        handleClick(period, e)
-                                    }
-                                />
-                            ))}
+                {projPts.length > 1 && (
+                    <>
+                        <path d={bandPath} fill={COLORS.moisture} fillOpacity={0.1} />
+                        <path d={smoothPath(projPts.map((p) => [x(p.time), yM(p.moisture)]))} fill="none" stroke={COLORS.moisture} strokeWidth={2} strokeDasharray="5 4" strokeOpacity={0.85} />
+                    </>
+                )}
 
-                        {visible.irrigation &&
-                            periods.map((period) => (
-                                <ReferenceLine
-                                    key={`${period.id}-start`}
-                                    yAxisId="percent"
-                                    x={period.x1}
-                                    stroke={COLORS.irrigation}
-                                    strokeOpacity={0.7}
-                                    strokeWidth={1.5}
-                                />
-                            ))}
+                {nowVisible && windowReadings.length > 0 && (
+                    <circle cx={x(windowReadings.at(-1)!.time)} cy={yM(windowReadings.at(-1)!.moisture)} r={4.5} fill={COLORS.moisture} stroke="#fff" strokeWidth={2} />
+                )}
 
-                        {visible.irrigation &&
-                            periods
-                                .filter((period) => !period.stillRunning)
-                                .map((period) => (
-                                    <ReferenceLine
-                                        key={`${period.id}-end`}
-                                        yAxisId="percent"
-                                        x={period.x2}
-                                        stroke={COLORS.irrigation}
-                                        strokeOpacity={0.7}
-                                        strokeWidth={1.5}
-                                    />
-                                ))}
+                {threshold !== null && (
+                    <>
+                        <line x1={ML} x2={width - MR} y1={yM(threshold)} y2={yM(threshold)} stroke={COLORS.threshold} strokeWidth={1.5} strokeDasharray="6 4" />
+                        <rect x={ML + 4} y={yM(threshold) - 17} width={168} height={15} rx={4} fill="#fff" fillOpacity={0.9} />
+                        <text x={ML + 9} y={yM(threshold) - 6} fontSize={11} fontWeight={600} fill={COLORS.threshold}>
+                            threshold {threshold}% · water needed below
+                        </text>
+                    </>
+                )}
 
-                        {/* RAIN PROBABILITY - shaded area, left axis */}
+                {windowReadings.length === 0 && (
+                    <text x={ML + plotW / 2} y={M.h / 2} textAnchor="middle" fontSize={12} fill={COLORS.text}>
+                        No moisture readings in this period
+                    </text>
+                )}
 
-                        {hasLocation && visible.rain && (
-                            <Area
-                                yAxisId="percent"
-                                data={weatherData}
-                                dataKey="rain"
-                                type="monotone"
-                                stroke={COLORS.rain}
-                                strokeWidth={1}
+                {hoverLine(M.h, M.top, M.bottom)}
+            </svg>
+
+            {/* TEMPERATURA */}
+            <div className="mt-2 text-xs text-slate-500">Temperature (°C)</div>
+
+            <svg {...svgProps} viewBox={`0 0 ${width} ${T.h}`}>
+                {tTicks.map((v) => (
+                    <g key={v}>
+                        <line x1={ML} x2={width - MR} y1={yT(v)} y2={yT(v)} stroke={COLORS.grid} />
+                        <text x={ML - 8} y={yT(v) + 4} textAnchor="end" fontSize={11} fill={COLORS.text}>{v}°</text>
+                    </g>
+                ))}
+                {gridX(T.h, T.top, T.bottom)}
+                {futureShade(T.h, T.top, T.bottom)}
+
+                {(() => {
+                    const past = windowWeather.filter((w) => w.time <= Math.min(now + HOUR_MS, t1));
+                    const fut = windowWeather.filter((w) => w.time >= Math.max(now - HOUR_MS, t0));
+                    return (
+                        <>
+                            {past.length > 1 && <path d={smoothPath(past.map((w) => [x(w.time), yT(w.temperature)]))} fill="none" stroke={COLORS.temperature} strokeWidth={2} />}
+                            {nowVisible && fut.length > 1 && <path d={smoothPath(fut.map((w) => [x(w.time), yT(w.temperature)]))} fill="none" stroke={COLORS.temperature} strokeWidth={2} strokeDasharray="5 4" strokeOpacity={0.85} />}
+                        </>
+                    );
+                })()}
+
+                {hoverLine(T.h, T.top, T.bottom)}
+            </svg>
+
+            {/* KIŠA */}
+            <div className="mt-2 text-xs text-slate-500">Rain probability (%)</div>
+
+            <svg {...svgProps} viewBox={`0 0 ${width} ${R.h}`}>
+                {[0, 50, 100].map((v) => (
+                    <g key={v}>
+                        <line x1={ML} x2={width - MR} y1={yR(v)} y2={yR(v)} stroke={COLORS.grid} />
+                        <text x={ML - 8} y={yR(v) + 4} textAnchor="end" fontSize={11} fill={COLORS.text}>{v}%</text>
+                    </g>
+                ))}
+                {gridX(R.h, R.top, R.bottom)}
+                {futureShade(R.h, R.top, R.bottom)}
+
+                {windowWeather
+                    .filter((w) => w.rainProbability > 0 && w.time >= t0 && w.time < t1)
+                    .map((w) => {
+                        const bw = Math.max(1, x(w.time + HOUR_MS) - x(w.time) - 2);
+                        const y0 = yR(w.rainProbability);
+                        return (
+                            <rect
+                                key={w.time}
+                                x={x(w.time) + 1}
+                                y={y0}
+                                width={bw}
+                                height={yR(0) - y0}
                                 fill={COLORS.rain}
-                                fillOpacity={0.15}
-                                isAnimationActive={false}
-                                connectNulls
+                                fillOpacity={nowVisible && w.time >= now ? 0.55 : 1}
+                                rx={Math.min(2, bw / 2)}
                             />
-                        )}
+                        );
+                    })}
 
-                        {/* TEMPERATURE - line, right axis */}
+                {ticks.map((k) => (
+                    <text key={k.t} x={x(k.t)} y={R.h - 6} textAnchor="middle" fontSize={11} fontWeight={k.day ? 600 : 400} fill={COLORS.text}>
+                        {k.day ? fmtDay(k.t, zone) : fmtTime(k.t, zone)}
+                    </text>
+                ))}
 
-                        {hasLocation && visible.temperature && (
-                            <Line
-                                yAxisId="temperature"
-                                data={weatherData}
-                                dataKey="temperature"
-                                type="monotone"
-                                stroke={COLORS.temperature}
-                                strokeWidth={2}
-                                dot={false}
-                                isAnimationActive={false}
-                                connectNulls
-                            />
-                        )}
+                {hoverLine(R.h, R.top, R.bottom)}
+            </svg>
 
-                        {/* AXIS ANCHOR - nevidljiva linija na granicama
-                            perioda; bez nje recharts ne crta oznake osa
-                            kad nema nijednog mjerenja. */}
+            <p className="mt-1 text-center text-[11px] text-slate-400">
+                ← drag the chart or use the arrows to see earlier days
+                {zone.timeZone && zone.timeZone !== Intl.DateTimeFormat().resolvedOptions().timeZone
+                    ? ` · times in ${zone.timeZone.split("/").pop()?.replace(/_/g, " ")} time`
+                    : ""}
+            </p>
 
-                        <Line
-                            yAxisId="percent"
-                            data={[
-                                { time: rangeStartMs, anchor: 0 },
-                                { time: rangeEndMs, anchor: 0 },
-                            ]}
-                            dataKey="anchor"
-                            stroke="none"
-                            dot={false}
-                            activeDot={false}
-                            tooltipType="none"
-                            legendType="none"
-                            isAnimationActive={false}
-                        />
+            {/* NAREDNA ZALIJEVANJA */}
+            {plan !== "none" && (
+                <div className="mt-4 border-t border-slate-100 pt-4">
+                    <p className="mb-2 text-sm font-semibold text-slate-600">Upcoming irrigation</p>
 
-                        {/* MOISTURE - line, same style as the other series,
-                            left axis */}
-
-                        {visible.moisture && (
-                            <Line
-                                yAxisId="percent"
-                                data={moistureData}
-                                dataKey="moisture"
-                                type="monotone"
-                                stroke={COLORS.moisture}
-                                strokeWidth={2}
-                                dot={false}
-                                isAnimationActive={false}
-                                connectNulls
-                            />
-                        )}
-                    </ComposedChart>
-                </ResponsiveContainer>
-
-                {/* EMPTY STATE - no moisture readings in this window */}
-
-                {moistureData.length === 0 && (
-                    <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                        <span className="rounded-lg border border-slate-200 bg-white/90 px-3 py-1.5 text-xs text-slate-500 shadow-sm">
-                            No measurements for this period
-                        </span>
-                    </div>
-                )}
-
-                {/* HOVER TOOLTIP for irrigation periods */}
-
-                {activePeriod && tooltip && (
-                    <div
-                        className="pointer-events-none absolute z-10 max-w-[220px] rounded-lg border bg-white px-3 py-2 text-xs shadow-lg"
-                        style={{
-                            left: Math.max(
-                                8,
-                                Math.min(
-                                    tooltip.x + 12,
-                                    (containerRef.current?.clientWidth ?? 0) -
-                                    190
-                                )
-                            ),
-                            top: Math.max(tooltip.y - 70, 8),
-                            borderColor: `${COLORS.irrigation}55`,
-                        }}
-                    >
-
-                        <p className="font-semibold text-slate-800">
-                            Irrigation
-                        </p>
-
-                        <p className="mt-1 text-slate-600">
-                            Started: {formatDateTime(activePeriod.start, multiDay)}
-                        </p>
-
-                        <p className="text-slate-600">
-                            Ended:{" "}
-                            {activePeriod.stillRunning
-                                ? "still running"
-                                : formatDateTime(activePeriod.end, multiDay)}
-                        </p>
-
-                        <p className="text-slate-600">
-                            Duration:{" "}
-                            {formatDuration(activePeriod.start, activePeriod.end)}
-                        </p>
-
-                    </div>
-                )}
-
-            </div>
-
-            {/* FILTERS / LEGEND - click a chip to show/hide that series */}
-
-            <div className="mt-3 flex flex-wrap gap-2">
-
-                {filterChips
-                    .filter((chip) => chip.available)
-                    .map((chip) => (
-                        <button
-                            key={chip.key}
-                            onClick={() => toggleSeries(chip.key)}
-                            className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition ${visible[chip.key]
-                                ? "border-slate-200 bg-white text-slate-700"
-                                : "border-slate-100 bg-slate-50 text-slate-400"
-                                }`}
-                        >
-                            <span
-                                className="h-2.5 w-2.5 rounded-full"
-                                style={{
-                                    backgroundColor: visible[chip.key]
-                                        ? chip.color
-                                        : "#cbd5e1",
-                                }}
-                            />
-                            {chip.label}
-                        </button>
-                    ))}
-
-            </div>
-
-            {!hasLocation && (
-                <p className="mt-2 text-xs text-slate-400">
-                    Set a location for this device to see temperature and
-                    rain probability here.
-                </p>
+                    {upcoming.length === 0 ? (
+                        <p className="text-sm text-slate-500">{emptyUpcoming[plan]}</p>
+                    ) : (
+                        <ul className="space-y-1.5">
+                            {upcoming.map((p) => (
+                                <li key={p.start} className="flex items-center gap-3 rounded-xl bg-slate-50 px-3 py-2 text-sm">
+                                    <span className="w-6 text-center text-base">{PLAN_ICON[p.source]}</span>
+                                    <span className="min-w-0 flex-1">
+                                        <span className="font-semibold text-slate-900">
+                                            {p.estimated ? "≈ " : ""}{fmtDateTime(p.start, zone)} · {p.minutes} min
+                                        </span>
+                                        <span className="block text-xs text-slate-500">{PLAN_SOURCE[p.source]}</span>
+                                    </span>
+                                    <span className="whitespace-nowrap rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-700">
+                                        {p.estimated ? "Expected" : "Planned"}
+                                    </span>
+                                </li>
+                            ))}
+                        </ul>
+                    )}
+                </div>
             )}
 
+            {tooltip}
         </div>
     );
 }

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { SETTINGS_CHANGED_EVENT } from "@/lib/chartPlan";
 
 type IrrigationMode = "manual" | "automatic" | "intelligent";
 type AutomaticSubMode = "moisture" | "schedule";
@@ -561,6 +562,19 @@ export default function IrrigationControl({
      * ---------------------------------------------------------
      */
 
+    /*
+     * Graf (MoistureChart) prikazuje prag i plan aktivnog režima -
+     * javi mu kad se režim, strategija ili raspored promijene.
+     */
+    function notifyChart() {
+        window.dispatchEvent(new Event(SETTINGS_CHANGED_EVENT));
+    }
+
+    useEffect(() => {
+        const timer = setTimeout(notifyChart, 800);
+        return () => clearTimeout(timer);
+    }, [mode, activeStrategy, automaticSubMode, schedules]);
+
     async function toggleStrategy(
         strategy: Exclude<ActiveStrategy, "none">
     ) {
@@ -662,6 +676,8 @@ export default function IrrigationControl({
                 "Error saving moisture settings:",
                 error
             );
+        } else {
+            notifyChart();
         }
 
         setSaving(false);

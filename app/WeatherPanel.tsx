@@ -45,7 +45,8 @@ async function fetchWeather(
     longitude: number
 ): Promise<WeatherData | undefined> {
     const url =
-        `https://api.open-meteo.com/v1/forecast` +
+        // Preko našeg servera (/api/weather) - browser ne zove Open-Meteo direktno.
+        `/api/weather` +
         `?latitude=${latitude}&longitude=${longitude}` +
         `&current=temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code` +
         `&hourly=precipitation_probability` +
